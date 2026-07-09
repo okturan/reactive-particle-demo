@@ -1,0 +1,667 @@
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const baseUrl = process.env.HAND_VERIFY_BASE_URL || 'http://127.0.0.1:5173';
+const profiles = [
+  {
+    name: 'open',
+    waitMs: 4500,
+    expect(state) {
+      const failures = [];
+      if (state.forceCount > 2) failures.push(`open palm should not upload many fingertip forces: ${state.forceCount}`);
+      if (state.forceEnergy > 0.75) failures.push(`open palm fingertip force too high ${state.forceEnergy}`);
+      if (state.palm[2] <= 0.75) failures.push(`open palm strength low ${state.palm[2]}`);
+      if (state.palm[2] > 2.2) failures.push(`open palm strength too high ${state.palm[2]}`);
+      if (!state.gestureText.includes('PALM')) failures.push(`open gesture not PALM: ${state.gestureText}`);
+      return failures;
+    },
+  },
+  {
+    name: 'pinch',
+    waitMs: 4500,
+    expect(state) {
+      const failures = [];
+      if (state.pinchEnergy <= 0.18) failures.push(`pinchEnergy low ${state.pinchEnergy}`);
+      if (!state.gestureText.includes('PINCH')) failures.push(`pinch gesture not PINCH: ${state.gestureText}`);
+      return failures;
+    },
+  },
+  {
+    name: 'point',
+    waitMs: 4500,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`point hand text bad: ${state.handText}`);
+      if (state.forceCount !== 1) failures.push(`point compact forceCount expected 1, got ${state.forceCount}`);
+      if (state.activeForceSlots !== 1) failures.push(`point active force slots expected 1, got ${state.activeForceSlots}`);
+      if (state.forceSources?.[0] !== 1) failures.push(`point source should be index finger slot 1, got ${state.forceSources}`);
+      if (sampleSummary.maxPalm > 0.2) failures.push(`point palm strength too high: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.maxPinch > 0.18) failures.push(`point pinch too high: ${sampleSummary.maxPinch}`);
+      if (sampleSummary.maxForceEnergy > 1.15) failures.push(`point forceEnergy too high: ${sampleSummary.maxForceEnergy}`);
+      if (state.gestureText.includes('PALM') || state.gestureText.includes('PINCH')) {
+        failures.push(`point gesture should stay local: ${state.gestureText}`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'glitch',
+    waitMs: 1350,
+    sampleCount: 42,
+    sampleEveryMs: 50,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`glitch hand text bad: ${state.handText}`);
+      if (sampleSummary.unstableFingerSamples < 1) failures.push('glitch did not expose an unstable fingertip frame');
+      if (sampleSummary.maxForcePositionStep > 1.1) {
+        failures.push(`glitch force jumped too far: ${sampleSummary.maxForcePositionStep}`);
+      }
+      if (sampleSummary.maxLiveForceDuringUnstable > 2) {
+        failures.push(`glitch activated too many live forces during unstable fingertip: ${sampleSummary.maxLiveForceDuringUnstable}`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'two',
+    waitMs: 4700,
+    sampleCount: 12,
+    sampleEveryMs: 140,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('2 HAND')) failures.push(`two-hand text bad: ${state.handText}`);
+      if (sampleSummary.shockActiveCount < 1) failures.push(`shock not active in sample window: ${state.shockAge}`);
+      return failures;
+    },
+  },
+  {
+    name: 'cross',
+    waitMs: 500,
+    sampleCount: 44,
+    sampleEveryMs: 120,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('2 HAND')) failures.push(`cross hand text bad: ${state.handText}`);
+      if (sampleSummary.slotIdentitySamples < 8) {
+        failures.push(`cross had too few two-slot identity samples: ${sampleSummary.slotIdentitySamples}`);
+      }
+      if (sampleSummary.slotIdentityMismatchCount > 0) {
+        failures.push(`cross slot identity flipped ${sampleSummary.slotIdentityMismatchCount} times`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'drop',
+    waitMs: 5200,
+    expect(state) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`drop hand text bad: ${state.handText}`);
+      if (state.forceCount > 2) failures.push(`drop retained stale fingertip forces: ${state.forceCount}`);
+      if (state.forceCount !== state.activeForceSlots) {
+        failures.push(`drop force loop not compacted: ${state.forceCount}/${state.activeForceSlots}`);
+      }
+      if (state.forceEnergy > 2.4) failures.push(`drop forceEnergy too high: ${state.forceEnergy}`);
+      if (!state.gestureText.includes('PALM')) failures.push(`drop gesture not PALM: ${state.gestureText}`);
+      return failures;
+    },
+  },
+  {
+    name: 'dropout',
+    waitMs: 1650,
+    sampleCount: 46,
+    sampleEveryMs: 50,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`dropout did not recover to one hand: ${state.handText}`);
+      if (state.handSlotResetCount !== 0) failures.push(`dropout reset hand slots: ${state.handSlotResetCount}`);
+      if (sampleSummary.maxPalm <= 0.25) failures.push(`dropout palm strength low: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.heldHandSamples < 1) failures.push('dropout did not hold cached palm during zero-hand frames');
+      if (sampleSummary.maxHeldHandCount < 1) failures.push(`dropout held too few hands: ${sampleSummary.maxHeldHandCount}`);
+      if (sampleSummary.zeroHandSamples > 0) failures.push(`dropout surfaced ${sampleSummary.zeroHandSamples} zero-hand UI samples`);
+      return failures;
+    },
+  },
+  {
+    name: 'stall',
+    waitMs: 1800,
+    sampleCount: 20,
+    sampleEveryMs: 50,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`stall did not recover to one hand: ${state.handText}`);
+      if (state.handSlotResetCount !== 0) failures.push(`stall reset hand slots: ${state.handSlotResetCount}`);
+      if (sampleSummary.zeroHandSamples > 0) failures.push(`stall surfaced ${sampleSummary.zeroHandSamples} zero-hand UI samples`);
+      if (sampleSummary.heldHandSamples < 3) failures.push(`stall held too briefly: ${sampleSummary.heldHandSamples}`);
+      if (sampleSummary.maxHeldHandCount < 1) failures.push(`stall held too few hands: ${sampleSummary.maxHeldHandCount}`);
+      if (sampleSummary.maxPalm <= 0.18) failures.push(`stall palm faded too far: ${sampleSummary.maxPalm}`);
+      return failures;
+    },
+  },
+  {
+    name: 'flicker',
+    waitMs: 700,
+    sampleCount: 24,
+    sampleEveryMs: 120,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`flicker hand text bad: ${state.handText}`);
+      if (sampleSummary.maxForceEnergy > 0.16) failures.push(`flicker forceEnergy too high: ${sampleSummary.maxForceEnergy}`);
+      if (sampleSummary.maxPalm > 0.18) failures.push(`flicker palm strength too high: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.maxPinch > 0.18) failures.push(`flicker pinch too high: ${sampleSummary.maxPinch}`);
+      return failures;
+    },
+  },
+  {
+    name: 'weak',
+    waitMs: 1300,
+    sampleCount: 12,
+    sampleEveryMs: 80,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('0 HAND')) failures.push(`weak hand should be rejected: ${state.handText}`);
+      if (state.forceCount !== 0 || state.activeForceSlots !== 0) {
+        failures.push(`weak hand created fingertip forces: ${state.forceCount}/${state.activeForceSlots}`);
+      }
+      if (sampleSummary.maxPalm > 0.12) failures.push(`weak hand created palm field: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.maxPinch > 0.12) failures.push(`weak hand created pinch: ${sampleSummary.maxPinch}`);
+      return failures;
+    },
+  },
+  {
+    name: 'corrupt',
+    waitMs: 3600,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('0 HAND')) failures.push(`corrupt frame should be rejected: ${state.handText}`);
+      if (state.invalidHandFrameCount < 1) failures.push(`corrupt frame was not counted: ${state.invalidHandFrameCount}`);
+      if (state.activeForceSlots !== 0) failures.push(`corrupt frame left active forces: ${state.activeForceSlots}`);
+      if (sampleSummary.maxPalm > 0.2) failures.push(`corrupt palm strength too high: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.maxPinch > 0.18) failures.push(`corrupt pinch too high: ${sampleSummary.maxPinch}`);
+      return failures;
+    },
+  },
+  {
+    name: 'sweep',
+    waitMs: 700,
+    sampleCount: 28,
+    sampleEveryMs: 120,
+    expect(state, sampleSummary) {
+      const failures = [];
+      if (!state.handText.includes('1 HAND')) failures.push(`sweep hand text bad: ${state.handText}`);
+      if (sampleSummary.maxPalm <= 0.25) failures.push(`sweep palm strength low: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.gustActiveCount < 1) failures.push('sweep did not trigger a gust wake');
+      return failures;
+    },
+  },
+];
+
+let serverProcess = null;
+
+try {
+  await ensureServer();
+  const adaptiveReport = await verifyAdaptiveTrackingFps();
+  const pointerReport = await verifyPointerInputToggle();
+  const liveGuardReport = await verifyLiveLoopGuards();
+  const reports = [];
+  for (const profile of profiles) {
+    reports.push(await verifyProfile(profile));
+  }
+
+  const adaptiveStatus = adaptiveReport.failures.length ? 'FAIL' : 'PASS';
+  console.log(
+    `${adaptiveStatus} adaptive: normal=${adaptiveReport.normalFps}fps, ` +
+      `renderPressure=${adaptiveReport.pressuredFps}fps, trackingPressure=${adaptiveReport.trackingPressuredFps}fps`,
+  );
+  for (const failure of adaptiveReport.failures) {
+    console.error(`  - ${failure}`);
+  }
+
+  const pointerStatus = pointerReport.failures.length ? 'FAIL' : 'PASS';
+  console.log(
+    `${pointerStatus} pointer: off=${pointerReport.off.forceCount}/${pointerReport.off.activeForceSlots}, ` +
+      `on=${pointerReport.on.forceCount}/${pointerReport.on.activeForceSlots}`,
+  );
+  for (const failure of pointerReport.failures) {
+    console.error(`  - ${failure}`);
+  }
+
+  const liveGuardStatus = liveGuardReport.failures.length ? 'FAIL' : 'PASS';
+  console.log(
+    `${liveGuardStatus} live-guards: hand=${liveGuardReport.errorGuard.hand.cameraMode}/${liveGuardReport.errorGuard.hand.trackingPressure.toFixed(2)}, ` +
+      `face=${liveGuardReport.errorGuard.face.cameraMode}/${liveGuardReport.errorGuard.face.trackingPressure.toFixed(2)}, ` +
+      `reset=${liveGuardReport.streamReset.forceCount}/${liveGuardReport.streamReset.forceEnergy.toFixed(3)}`,
+  );
+  for (const failure of liveGuardReport.failures) {
+    console.error(`  - ${failure}`);
+  }
+
+  for (const report of reports) {
+    const status = report.failures.length ? 'FAIL' : 'PASS';
+    console.log(
+      `${status} ${report.profile}: ${report.state.gestureText}, ${report.state.handText}, ` +
+        `forces=${report.state.forceCount}/${report.state.activeForceSlots}, forceEnergy=${report.state.forceEnergy.toFixed(3)}, ` +
+        `live=${report.state.liveForceCount}, unstable=${report.sampleSummary.maxUnstableFingerCount}, ` +
+        `palm=${report.state.palm[2].toFixed(3)}, pinch=${report.state.pinchEnergy.toFixed(3)}, ` +
+        `shockAge=${report.state.shockAge.toFixed(3)}, maxForce=${report.sampleSummary.maxForceEnergy.toFixed(3)}, ` +
+        `gust=${report.sampleSummary.gustActiveCount}, shock=${report.sampleSummary.shockActiveCount}, ` +
+        `zero=${report.sampleSummary.zeroHandSamples}, held=${report.sampleSummary.maxHeldHandCount}/${report.sampleSummary.maxHeldForceCount}, ` +
+        `invalid=${report.state.invalidHandFrameCount}, ` +
+        `resets=${report.state.handSlotResetCount}, slots=${report.sampleSummary.slotIdentityMismatchCount}, ` +
+        `debugReads=${report.state.debugLandmarkReadCount}, sources=${JSON.stringify(report.state.forceSources)}, lit=${report.lit}`,
+    );
+    for (const failure of report.failures) {
+      console.error(`  - ${failure}`);
+    }
+  }
+
+  if (
+    adaptiveReport.failures.length ||
+    pointerReport.failures.length ||
+    liveGuardReport.failures.length ||
+    reports.some((report) => report.failures.length)
+  ) {
+    process.exitCode = 1;
+  }
+} finally {
+  if (serverProcess) {
+    serverProcess.kill('SIGTERM');
+  }
+}
+
+async function verifyAdaptiveTrackingFps() {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
+  const failures = [];
+
+  page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    const text = message.text();
+    if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL/.test(text)) {
+      failures.push(`console: ${text}`);
+    }
+  });
+
+  await page.addInitScript(() => {
+    localStorage.removeItem('particle-demo-particle-settings');
+    localStorage.removeItem('particle-demo-face-calibration');
+  });
+  const url = `${baseUrl}/?mode=hand&verify=1&syntheticHand=open`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForFunction(() => window.__particleDemoVerify && window.__particleDemoVerify.getState().handText.includes('HAND'));
+
+  const normal = await page.evaluate(() => {
+    window.__particleDemoVerify.setRenderPressure(0);
+    window.__particleDemoVerify.setTrackingPressure(0);
+    return window.__particleDemoVerify.getState();
+  });
+  const pressured = await page.evaluate(() => {
+    window.__particleDemoVerify.setRenderPressure(1);
+    window.__particleDemoVerify.setTrackingPressure(0);
+    return window.__particleDemoVerify.getState();
+  });
+  const trackingPressured = await page.evaluate(() => {
+    window.__particleDemoVerify.setRenderPressure(0);
+    window.__particleDemoVerify.setTrackingPressure(1);
+    return window.__particleDemoVerify.getState();
+  });
+  const duplicateGate = await page.evaluate(() => window.__particleDemoVerify.testVideoFrameGate(12.5, 12.5));
+  const freshGate = await page.evaluate(() => window.__particleDemoVerify.testVideoFrameGate(12.5, 12.55));
+
+  if (normal.effectiveTrackingFps !== 45) {
+    failures.push(`normal effectiveTrackingFps expected 45, got ${normal.effectiveTrackingFps}`);
+  }
+  if (pressured.effectiveTrackingFps !== 30) {
+    failures.push(`pressured effectiveTrackingFps expected 30, got ${pressured.effectiveTrackingFps}`);
+  }
+  if (trackingPressured.effectiveTrackingFps !== 30) {
+    failures.push(`tracking pressure effectiveTrackingFps expected 30, got ${trackingPressured.effectiveTrackingFps}`);
+  }
+  if (!(pressured.effectiveTrackingFps < normal.effectiveTrackingFps)) {
+    failures.push(`pressure did not reduce tracking FPS: ${normal.effectiveTrackingFps} -> ${pressured.effectiveTrackingFps}`);
+  }
+  if (!(trackingPressured.effectiveTrackingFps < normal.effectiveTrackingFps)) {
+    failures.push(
+      `tracking pressure did not reduce tracking FPS: ${normal.effectiveTrackingFps} -> ${trackingPressured.effectiveTrackingFps}`,
+    );
+  }
+  if (normal.debugLandmarkReadCount !== 0) {
+    failures.push(`hidden debug path read landmarks ${normal.debugLandmarkReadCount} times`);
+  }
+  if (!duplicateGate.duplicate || duplicateGate.duplicateFrameSkipCount !== 1) {
+    failures.push(`duplicate video frame gate failed: ${JSON.stringify(duplicateGate)}`);
+  }
+  if (freshGate.duplicate || freshGate.duplicateFrameSkipCount !== 0) {
+    failures.push(`fresh video frame gate failed: ${JSON.stringify(freshGate)}`);
+  }
+
+  await browser.close();
+  return {
+    failures,
+    normalFps: normal.effectiveTrackingFps,
+    pressuredFps: pressured.effectiveTrackingFps,
+    trackingPressuredFps: trackingPressured.effectiveTrackingFps,
+  };
+}
+
+async function verifyPointerInputToggle() {
+  const browser = await chromium.launch({ headless: true });
+  const failures = [];
+  const off = await readPointerState(browser, false, failures);
+  const on = await readPointerState(browser, true, failures);
+
+  if (off.pointerEnabled) failures.push('pointer should be disabled by default');
+  if (off.forceCount !== 0 || off.activeForceSlots !== 0 || off.forceEnergy > 0.04) {
+    failures.push(`pointer disabled still created force: ${JSON.stringify(pickPointerState(off))}`);
+  }
+  if (!on.pointerEnabled) failures.push('pointer should be enabled with mouse=1');
+  if (on.forceCount !== 1 || on.activeForceSlots !== 1 || on.forceEnergy < 0.18) {
+    failures.push(`pointer enabled did not create force: ${JSON.stringify(pickPointerState(on))}`);
+  }
+
+  await browser.close();
+  return { failures, off, on };
+}
+
+async function readPointerState(browser, enabled, failures) {
+  const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
+  page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    const text = message.text();
+    if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL/.test(text)) {
+      failures.push(`console: ${text}`);
+    }
+  });
+  await page.addInitScript(() => {
+    localStorage.removeItem('particle-demo-particle-settings');
+    localStorage.removeItem('particle-demo-face-calibration');
+  });
+  const url = `${baseUrl}/?mode=hand&verify=1&syntheticHand=none${enabled ? '&mouse=1' : ''}`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForFunction(() => window.__particleDemoVerify && window.__particleDemoVerify.getState().handText.includes('HAND'));
+  await page.evaluate(() => {
+    const canvas = document.querySelector('#scene');
+    canvas.dispatchEvent(
+      new PointerEvent('pointermove', {
+        bubbles: true,
+        clientX: Math.round(window.innerWidth * 0.5),
+        clientY: Math.round(window.innerHeight * 0.5),
+        pointerId: 1,
+        pointerType: 'mouse',
+      }),
+    );
+  });
+  await page.waitForTimeout(420);
+  const state = await page.evaluate(() => window.__particleDemoVerify.getState());
+  await page.close();
+  return state;
+}
+
+function pickPointerState(state) {
+  return {
+    pointerEnabled: state.pointerEnabled,
+    forceCount: state.forceCount,
+    activeForceSlots: state.activeForceSlots,
+    forceEnergy: Number(state.forceEnergy.toFixed(3)),
+    handText: state.handText,
+    gestureText: state.gestureText,
+  };
+}
+
+async function verifyLiveLoopGuards() {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
+  const failures = [];
+
+  page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    const text = message.text();
+    if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL|verify tracking error|verify face tracking error/.test(text)) {
+      failures.push(`console: ${text}`);
+    }
+  });
+
+  await page.addInitScript(() => {
+    localStorage.removeItem('particle-demo-particle-settings');
+    localStorage.removeItem('particle-demo-face-calibration');
+  });
+  await page.goto(`${baseUrl}/?mode=hand&verify=1&syntheticHand=open`, {
+    waitUntil: 'domcontentloaded',
+    timeout: 60_000,
+  });
+  await page.waitForFunction(() => window.__particleDemoVerify && window.__particleDemoVerify.getState().handText.includes('HAND'));
+
+  const errorGuard = await page.evaluate(() => window.__particleDemoVerify.testTrackingErrorGuard());
+  const streamReset = await page.evaluate(() => window.__particleDemoVerify.testStreamResetClearsTracking());
+
+  if (errorGuard.hand.cameraMode !== 'TRACK ERR') {
+    failures.push(`hand tracking error did not surface TRACK ERR: ${JSON.stringify(errorGuard.hand)}`);
+  }
+  if (errorGuard.face.cameraMode !== 'TRACK ERR') {
+    failures.push(`face tracking error did not surface TRACK ERR: ${JSON.stringify(errorGuard.face)}`);
+  }
+  if (errorGuard.hand.trackingPressure < 0.65 || errorGuard.face.trackingPressure < 0.65) {
+    failures.push(`tracking error did not raise pressure: ${JSON.stringify(errorGuard)}`);
+  }
+  if (errorGuard.hand.health.missCount < 1 || errorGuard.face.health.missCount < 1) {
+    failures.push(`tracking error did not update health misses: ${JSON.stringify(errorGuard)}`);
+  }
+  if (streamReset.hasPalmCache || streamReset.hasFaceCache) {
+    failures.push(`stream reset left tracking caches: ${JSON.stringify(streamReset)}`);
+  }
+  if (streamReset.handLastSeen > -9999) {
+    failures.push(`stream reset left hand lastSeen active: ${streamReset.handLastSeen}`);
+  }
+  if (streamReset.forceCount !== 0 || streamReset.forceEnergy > 0.001 || streamReset.palm[2] > 0.001 || streamReset.face[3] > 0.001) {
+    failures.push(`stream reset left uniforms active: ${JSON.stringify(streamReset)}`);
+  }
+  if (streamReset.health.liveCount !== 0 || streamReset.health.missCount !== 0) {
+    failures.push(`stream reset did not clear tracking health: ${JSON.stringify(streamReset.health)}`);
+  }
+
+  await browser.close();
+  return { failures, errorGuard, streamReset };
+}
+
+async function ensureServer() {
+  if (await canReachServer()) {
+    return;
+  }
+
+  const viteBin = path.join(rootDir, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
+  if (!existsSync(viteBin)) {
+    throw new Error('Vite binary not found. Run npm install first.');
+  }
+
+  serverProcess = spawn(viteBin, ['--host', '127.0.0.1'], {
+    cwd: rootDir,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, BROWSER: 'none' },
+  });
+
+  serverProcess.stdout.on('data', (chunk) => process.stdout.write(`[vite] ${chunk}`));
+  serverProcess.stderr.on('data', (chunk) => process.stderr.write(`[vite] ${chunk}`));
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (await canReachServer()) {
+      return;
+    }
+    await delay(250);
+  }
+
+  throw new Error(`Timed out waiting for ${baseUrl}`);
+}
+
+async function canReachServer() {
+  try {
+    const response = await fetch(baseUrl, { method: 'GET' });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyProfile(profile) {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+  const failures = [];
+
+  page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    const text = message.text();
+    if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL/.test(text)) {
+      failures.push(`console: ${text}`);
+    }
+  });
+
+  await page.addInitScript(() => {
+    localStorage.removeItem('particle-demo-particle-settings');
+    localStorage.removeItem('particle-demo-face-calibration');
+  });
+
+  const url = `${baseUrl}/?mode=hand&settings=1&debug=1&verify=1&syntheticHand=${profile.name}`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForFunction(
+    () => window.__particleDemoVerify && window.__particleDemoVerify.getState().handText.includes('HAND'),
+    null,
+    { timeout: 30_000 },
+  );
+  await page.evaluate(() => window.__particleDemoVerify.resetHandTrackingForTest());
+  await page.waitForTimeout(profile.waitMs);
+
+  const samples = [];
+  const sampleCount = profile.sampleCount || 1;
+  const sampleEveryMs = profile.sampleEveryMs || 0;
+  for (let index = 0; index < sampleCount; index += 1) {
+    if (index > 0 && sampleEveryMs > 0) {
+      await page.waitForTimeout(sampleEveryMs);
+    }
+    samples.push(await page.evaluate(() => window.__particleDemoVerify.getState()));
+  }
+
+  const state = samples[samples.length - 1];
+  const sampleSummary = summarizeSamples(samples);
+  const screenshot = await page.screenshot({ type: 'png' });
+  const lit = countLitSamples(screenshot);
+
+  if (state.mode !== 0) failures.push(`wrong mode ${state.mode}`);
+  if (!state.handText.includes('HAND')) failures.push(`bad hand text ${state.handText}`);
+  if (state.debugLandmarkReadCount < 1) failures.push('debug overlay did not read landmarks');
+  if (lit < 500) failures.push(`lit sample low ${lit}`);
+  failures.push(...profile.expect(state, sampleSummary));
+
+  await browser.close();
+  return { profile: profile.name, failures, state, sampleSummary, lit };
+}
+
+function summarizeSamples(samples) {
+  let maxForceCount = 0;
+  let maxActiveForceSlots = 0;
+  let maxForceEnergy = 0;
+  let maxForcePositionStep = 0;
+  let maxPalm = 0;
+  let maxPinch = 0;
+  let unstableFingerSamples = 0;
+  let maxUnstableFingerCount = 0;
+  let maxLiveForceDuringUnstable = 0;
+  let gustActiveCount = 0;
+  let shockActiveCount = 0;
+  let zeroHandSamples = 0;
+  let heldForceSamples = 0;
+  let maxHeldForceCount = 0;
+  let heldHandSamples = 0;
+  let maxHeldHandCount = 0;
+  let slotIdentitySamples = 0;
+  let slotIdentityMismatchCount = 0;
+  let initialSlotIdentity = null;
+  let previousPrimaryForce = null;
+  for (const state of samples) {
+    maxForceCount = Math.max(maxForceCount, state.forceCount);
+    maxActiveForceSlots = Math.max(maxActiveForceSlots, state.activeForceSlots);
+    maxForceEnergy = Math.max(maxForceEnergy, state.forceEnergy);
+    const primaryForce = state.forces?.[0];
+    if (primaryForce && primaryForce[2] > 0.02) {
+      if (previousPrimaryForce) {
+        maxForcePositionStep = Math.max(
+          maxForcePositionStep,
+          Math.hypot(primaryForce[0] - previousPrimaryForce[0], primaryForce[1] - previousPrimaryForce[1]),
+        );
+      }
+      previousPrimaryForce = primaryForce;
+    }
+    maxPalm = Math.max(maxPalm, state.palm[2]);
+    maxPinch = Math.max(maxPinch, state.pinchEnergy);
+    if ((state.unstableFingerCount || 0) > 0) {
+      unstableFingerSamples += 1;
+      maxLiveForceDuringUnstable = Math.max(maxLiveForceDuringUnstable, state.liveForceCount || 0);
+    }
+    maxUnstableFingerCount = Math.max(maxUnstableFingerCount, state.unstableFingerCount || 0);
+    if (state.gustAge >= 0 && state.gustAge < 1.2) {
+      gustActiveCount += 1;
+    }
+    if (state.shockAge >= 0 && state.shockAge < 1.85) {
+      shockActiveCount += 1;
+    }
+    if (state.handText.includes('0 HAND')) {
+      zeroHandSamples += 1;
+    }
+    if ((state.heldForceCount || 0) > 0) {
+      heldForceSamples += 1;
+    }
+    maxHeldForceCount = Math.max(maxHeldForceCount, state.heldForceCount || 0);
+    if ((state.trackingHealth?.heldCount || 0) > 0) {
+      heldHandSamples += 1;
+    }
+    maxHeldHandCount = Math.max(maxHeldHandCount, state.trackingHealth?.heldCount || 0);
+    const [slot0, slot1] = state.handSlots || [];
+    const bothSlotsFresh = slot0?.lastSeenAge < 350 && slot1?.lastSeenAge < 350;
+    if (bothSlotsFresh) {
+      slotIdentitySamples += 1;
+      const currentIdentity = `${slot0.handedness || '-'}:${slot1.handedness || '-'}`;
+      if (!initialSlotIdentity) {
+        initialSlotIdentity = currentIdentity;
+      } else if (currentIdentity !== initialSlotIdentity) {
+        slotIdentityMismatchCount += 1;
+      }
+    }
+  }
+  return {
+    maxForceCount,
+    maxActiveForceSlots,
+    maxForceEnergy,
+    maxForcePositionStep,
+    maxPalm,
+    maxPinch,
+    unstableFingerSamples,
+    maxUnstableFingerCount,
+    maxLiveForceDuringUnstable,
+    gustActiveCount,
+    shockActiveCount,
+    zeroHandSamples,
+    heldForceSamples,
+    maxHeldForceCount,
+    heldHandSamples,
+    maxHeldHandCount,
+    slotIdentitySamples,
+    slotIdentityMismatchCount,
+  };
+}
+
+function countLitSamples(buffer) {
+  let lit = 0;
+  for (let index = 33; index < buffer.length - 4; index += 17) {
+    if (buffer[index] + buffer[index + 1] + buffer[index + 2] > 45) {
+      lit += 1;
+    }
+  }
+  return lit;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
