@@ -345,7 +345,7 @@ const FACE_RESULT_FRESH_MS = 420;
 const FACE_DROPOUT_HOLD_MS = 420;
 const FACE_CACHE_RESET_GRACE_MS = 1100;
 const HAND_RESULT_FRESH_MS = 560;
-const HAND_DROPOUT_HOLD_MS = 820;
+const HAND_DROPOUT_HOLD_MS = 1050;
 const HAND_SLOT_RESET_GRACE_MS = 1700;
 const HAND_MIN_TRACKING_CONFIDENCE = 0.38;
 const HAND_MIN_FRAME_QUALITY = 0.28;
@@ -427,6 +427,8 @@ let latestHandResult = null;
 let latestFaceResult = null;
 let latestDetectionAt = 0;
 let latestFaceDetectionAt = 0;
+let verifyFaceStateOverride = null;
+let verifyFaceStateUntil = 0;
 let lastTrackingAt = 0;
 let lastTrackingErrorAt = 0;
 let lastProcessedVideoTime = -1;
@@ -449,7 +451,7 @@ let activeCameraDeviceId = '';
 let reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 let bloomPass;
 let renderPixelRatio = getInitialPixelRatio();
-let activeParticleCount = qualityMode === 'high' ? PARTICLE_COUNT : getParticleBudget();
+let activeParticleCount = getParticleBudget();
 let lastRenderAt = 0;
 
 const previousPalmCenters = new Map();
@@ -711,6 +713,8 @@ function installVerifyHooks() {
     resetHandTrackingForTest() {
       resetHandTrackingCaches({ resetCounters: true });
       resetHandUniforms();
+      lastSyntheticHandAt = 0;
+      syntheticHandStartedAt = 0;
       return this.getState();
     },
     testTrackingErrorGuard() {
@@ -1030,6 +1034,8 @@ function installVerifyHooks() {
       }
       updateTrackingHealth(TRACKING_MODES.FACE, 1, 0);
       drawTrackingDebug(null, expressiveState);
+      verifyFaceStateOverride = expressiveState;
+      verifyFaceStateUntil = performance.now() + 900;
 
       return { active, faded };
     },
@@ -1067,6 +1073,10 @@ function installVerifyHooks() {
         pinchEnergy,
         pinches: uniforms.uPinch.value.map((pinch) => pinch.toArray()),
         activeParticleCount,
+        particleDensity: particleSettings.particleDensity,
+        particleBudget: getParticleBudget(),
+        drawRangeCount: points?.geometry.drawRange.count ?? 0,
+        qualityMode,
         renderPixelRatio,
         renderPressure: renderStats.pressure,
         trackingPressure: trackingStats.pressure,
@@ -2656,6 +2666,8 @@ function resetTrackingForStreamChange() {
   lastProcessedVideoTime = -1;
   resetHandTrackingCaches();
   resetFaceTrackingCaches();
+  verifyFaceStateOverride = null;
+  verifyFaceStateUntil = 0;
   resetHandUniforms();
   resetFaceUniforms();
   resetTrackingHealth();
@@ -2790,6 +2802,15 @@ function hasFiniteLandmark(landmark, requireZ = false) {
 }
 
 function readFaceFrame(deltaSeconds) {
+  if (verifyMode && verifyFaceStateOverride) {
+    if (performance.now() <= verifyFaceStateUntil) {
+      updateTrackingHealth(TRACKING_MODES.FACE, 1, 0);
+      return verifyFaceStateOverride;
+    }
+    verifyFaceStateOverride = null;
+    verifyFaceStateUntil = 0;
+  }
+
   const faceResult = getFreshFaceResult();
   const landmarks = faceResult?.faceLandmarks?.[0];
   if (!landmarks) {
@@ -3791,7 +3812,7 @@ function updateRenderPerformance(deltaSeconds) {
 
   renderStats.lastQualityAt = now;
   const maxRatio = Math.min(window.devicePixelRatio || 1, 1.65);
-  const maxParticleCount = qualityMode === 'high' ? PARTICLE_COUNT : getParticleBudget();
+  const maxParticleCount = getParticleBudget();
   const previousRatio = renderPixelRatio;
   const previousParticleCount = activeParticleCount;
   const adaptivePressure = getAdaptivePressure();
@@ -4114,7 +4135,7 @@ function createParticleSettingRow(control) {
   input.addEventListener('input', () => {
     particleSettings[control.key] = Number(input.value);
     value.textContent = formatParticleSettingValue(particleSettings[control.key], control);
-    applyParticleSettings();
+    applyParticleSettings({ syncParticleCount: control.key === 'particleDensity' });
     saveParticleSettings();
     updateParticleSettingsValues();
   });
@@ -4123,7 +4144,7 @@ function createParticleSettingRow(control) {
   return row;
 }
 
-function applyParticleSettings() {
+function applyParticleSettings({ syncParticleCount = false } = {}) {
   uniforms.uMotionSettings.value.set(
     particleSettings.particleForce,
     particleSettings.particleCurl,
@@ -4151,9 +4172,10 @@ function applyParticleSettings() {
     bloomPass.enabled = particleSettings.bloom > 0.001;
   }
 
-  if (qualityMode !== 'high') {
-    activeParticleCount = Math.min(activeParticleCount, getParticleBudget());
-  }
+  const particleBudget = getParticleBudget();
+  activeParticleCount = syncParticleCount
+    ? particleBudget
+    : Math.min(activeParticleCount, particleBudget);
   if (points) {
     points.geometry.setDrawRange(0, activeParticleCount);
   }
@@ -4175,7 +4197,7 @@ function updateSettingsModeState() {
 function resetParticleSettings() {
   particleSettings = { ...DEFAULT_PARTICLE_SETTINGS };
   saveParticleSettings();
-  applyParticleSettings();
+  applyParticleSettings({ syncParticleCount: true });
   for (const control of PARTICLE_SETTING_CONTROLS) {
     const input = document.querySelector(`#setting-${control.key}`);
     const output = settingsControls.querySelector(`[data-key="${control.key}:value"]`);
@@ -4759,15 +4781,15 @@ void main() {
     float leash = 0.052 + length(target.xy) * 0.022 + (1.0 - aCore) * 0.024;
     float dragAmount = pow(1.0 - faceFollow, 0.75);
     logoPoint -= headLag * leash * (1.0 + sway * 2.0) * dragAmount;
-    logoPoint += vec2(-headLag.y, headLag.x) * sin(aSeed * 23.0 + uTime * 4.5) * leash * (0.38 + motionKick * 0.82);
+    logoPoint += vec2(-headLag.y, headLag.x) * sin(aSeed * 23.0 + uTime * 4.5) * leash * (0.38 + motionKick * 0.32);
     vec3 faceMounted = vec3(
       uFace.xy + logoPoint,
-      2.05 + target.z * uFace.z * 0.55 + yaw * localPoint.x * 0.18 + mouthPulse * (0.16 + breathRipple * 0.18) + eyeZone * eyeIgnition * 0.2 + faceShake * faceMotion * 1.65 + motionKick * sin(aSeed * 29.0 + uTime * 24.0) * 0.45
+      2.05 + target.z * uFace.z * 0.55 + yaw * localPoint.x * 0.18 + mouthPulse * (0.16 + breathRipple * 0.18) + eyeZone * eyeIgnition * 0.2 + faceShake * faceMotion * 0.42 + motionKick * sin(aSeed * 29.0 + uTime * 24.0) * 0.18
     );
     transformed = mix(transformed, faceMounted, faceStrength);
     eyeGlow = faceStrength * eyeZone * eyeIntensity * eyeIgnition * (0.22 + eyeIgnition * 1.45);
     faceGlow = faceStrength * (
-      0.55 + aCore * 0.65 + mouthPulse * (0.55 + breathRipple * 0.45) + yawAmount * 0.28 + sway * 0.5 + motionKick * 0.9
+      0.34 + aCore * 0.44 + mouthPulse * (0.1 + breathRipple * 0.12) + yawAmount * 0.12 + sway * 0.08 + motionKick * 0.07
     );
   }
 

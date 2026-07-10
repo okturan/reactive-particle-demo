@@ -17,7 +17,7 @@ try {
       `jitter=${report.filter.jitterMove.toFixed(4)}, jump=${report.filter.jumpStep.toFixed(4)}/${report.filter.jumpTargetDistance.toFixed(4)}, ` +
       `pose=${report.pose.scaleStep.toFixed(3)}/${report.pose.rollStep.toFixed(3)}/${report.pose.yawStep.toFixed(3)}, ` +
       `speed=${report.filter.speed.toFixed(3)}, eye=${report.expression.squintIgnition.toFixed(3)}/${report.expression.tiredIgnition.toFixed(3)}, ` +
-      `mounted=${report.mounted.active.face[3].toFixed(3)}, lit=${report.lit}`,
+      `mounted=${report.mounted.active.face[3].toFixed(3)}, bright=${report.visual.brightPixels}, mean=${report.visual.meanLuminance.toFixed(1)}`,
   );
   for (const failure of report.failures) {
     console.error(`  - ${failure}`);
@@ -63,8 +63,7 @@ async function verifyFaceTrackingFilters() {
   const mounted = await page.evaluate(() => window.__particleDemoVerify.testFaceStateApplication());
   const settings = await verifySettingsIsolation(page);
   await page.waitForTimeout(140);
-  const screenshot = await page.screenshot({ type: 'png' });
-  const lit = countLitSamples(screenshot);
+  const visual = await readCanvasMetrics(page);
 
   if (!dropout.keptAfterShortMiss) {
     failures.push('face center cache cleared on a short detection miss');
@@ -135,13 +134,16 @@ async function verifyFaceTrackingFilters() {
   if (mounted.faded.health.missCount < 1) {
     failures.push(`invisible face state did not record a miss: ${JSON.stringify(mounted.faded.health)}`);
   }
-  if (lit < 500) {
-    failures.push(`synthetic face render lit sample low ${lit}`);
+  if (visual.brightPixels < 500) {
+    failures.push(`synthetic face render is too dim: ${JSON.stringify(visual)}`);
+  }
+  if (visual.brightPixels > 18_000 || visual.whitePixels > 10_000 || visual.meanLuminance > 150) {
+    failures.push(`synthetic face render washes out the viewport: ${JSON.stringify(visual)}`);
   }
   failures.push(...settings.failures);
 
   await browser.close();
-  return { failures, dropout, invalid, filter, pose, expression, mounted, settings, lit };
+  return { failures, dropout, invalid, filter, pose, expression, mounted, settings, visual };
 }
 
 async function ensureServer() {
@@ -321,12 +323,32 @@ async function verifySettingsIsolation(page) {
   return { failures, state };
 }
 
-function countLitSamples(buffer) {
-  let lit = 0;
-  for (let index = 33; index < buffer.length - 4; index += 17) {
-    if (buffer[index] + buffer[index + 1] + buffer[index + 2] > 45) {
-      lit += 1;
+async function readCanvasMetrics(page) {
+  return page.evaluate(() => {
+    const source = document.querySelector('#scene');
+    const probe = document.createElement('canvas');
+    probe.width = 240;
+    probe.height = 150;
+    const context = probe.getContext('2d', { willReadFrequently: true });
+    context.drawImage(source, 0, 0, probe.width, probe.height);
+    const pixels = context.getImageData(0, 0, probe.width, probe.height).data;
+    let brightPixels = 0;
+    let whitePixels = 0;
+    let luminanceTotal = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const luminance = pixels[index] * 0.2126 + pixels[index + 1] * 0.7152 + pixels[index + 2] * 0.0722;
+      luminanceTotal += luminance;
+      if (luminance > 120) {
+        brightPixels += 1;
+      }
+      if (luminance > 220) {
+        whitePixels += 1;
+      }
     }
-  }
-  return lit;
+    return {
+      brightPixels,
+      whitePixels,
+      meanLuminance: luminanceTotal / (pixels.length / 4),
+    };
+  });
 }

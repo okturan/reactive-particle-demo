@@ -205,6 +205,7 @@ let serverProcess = null;
 try {
   await ensureServer();
   const adaptiveReport = await verifyAdaptiveTrackingFps();
+  const densityReport = await verifyParticleDensityControl();
   const pointerReport = await verifyPointerInputToggle();
   const liveGuardReport = await verifyLiveLoopGuards();
   const reports = [];
@@ -218,6 +219,16 @@ try {
       `renderPressure=${adaptiveReport.pressuredFps}fps, trackingPressure=${adaptiveReport.trackingPressuredFps}fps`,
   );
   for (const failure of adaptiveReport.failures) {
+    console.error(`  - ${failure}`);
+  }
+
+  const densityStatus = densityReport.failures.length ? 'FAIL' : 'PASS';
+  console.log(
+    `${densityStatus} density: auto=${densityReport.auto.low.activeParticleCount}->${densityReport.auto.high.activeParticleCount}, ` +
+      `high=${densityReport.high.low.activeParticleCount}->${densityReport.high.high.activeParticleCount}, ` +
+      `visual=${densityReport.auto.low.litPixels}->${densityReport.auto.high.litPixels}`,
+  );
+  for (const failure of densityReport.failures) {
     console.error(`  - ${failure}`);
   }
 
@@ -261,6 +272,7 @@ try {
 
   if (
     adaptiveReport.failures.length ||
+    densityReport.failures.length ||
     pointerReport.failures.length ||
     liveGuardReport.failures.length ||
     reports.some((report) => report.failures.length)
@@ -271,6 +283,100 @@ try {
   if (serverProcess) {
     serverProcess.kill('SIGTERM');
   }
+}
+
+async function verifyParticleDensityControl() {
+  const browser = await chromium.launch({ headless: true });
+  const failures = [];
+  const auto = await readParticleDensityTransition(browser, 'auto', failures);
+  const high = await readParticleDensityTransition(browser, 'high', failures);
+
+  for (const report of [auto, high]) {
+    const label = report.qualityMode;
+    if (report.low.activeParticleCount !== 22_000 || report.low.particleBudget !== 22_000) {
+      failures.push(`${label} density did not decrease immediately: ${JSON.stringify(report.low)}`);
+    }
+    if (report.high.activeParticleCount !== 86_000 || report.high.particleBudget !== 86_000) {
+      failures.push(`${label} density did not increase immediately: ${JSON.stringify(report.high)}`);
+    }
+    if (report.low.drawRangeCount !== report.low.activeParticleCount) {
+      failures.push(`${label} low density draw range is stale: ${JSON.stringify(report.low)}`);
+    }
+    if (report.high.drawRangeCount !== report.high.activeParticleCount) {
+      failures.push(`${label} high density draw range is stale: ${JSON.stringify(report.high)}`);
+    }
+    if (report.high.litPixels < report.low.litPixels * 1.5) {
+      failures.push(`${label} density lacks a visible render difference: ${JSON.stringify(report)}`);
+    }
+  }
+
+  await browser.close();
+  return { failures, auto, high };
+}
+
+async function readParticleDensityTransition(browser, qualityMode, failures) {
+  const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
+  page.on('pageerror', (error) => failures.push(`density ${qualityMode} pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    const text = message.text();
+    if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL/.test(text)) {
+      failures.push(`density ${qualityMode} console: ${text}`);
+    }
+  });
+  await page.addInitScript(() => {
+    localStorage.removeItem('particle-demo-particle-settings');
+    localStorage.removeItem('particle-demo-face-calibration');
+  });
+  const qualityQuery = qualityMode === 'high' ? '&quality=high' : '';
+  await page.goto(`${baseUrl}/?mode=hand&settings=1&verify=1&syntheticHand=none${qualityQuery}`, {
+    waitUntil: 'domcontentloaded',
+    timeout: 60_000,
+  });
+  await page.waitForFunction(() => window.__particleDemoVerify?.getState().drawRangeCount > 0, null, {
+    timeout: 30_000,
+  });
+
+  const setDensity = async (value) => {
+    const immediate = await page.evaluate((nextValue) => {
+      const densityInput = document.querySelector('#setting-particleDensity');
+      densityInput.value = String(nextValue);
+      densityInput.dispatchEvent(new Event('input', { bubbles: true }));
+      const state = window.__particleDemoVerify.getState();
+      return {
+        activeParticleCount: state.activeParticleCount,
+        particleBudget: state.particleBudget,
+        drawRangeCount: state.drawRangeCount,
+        particleDensity: state.particleDensity,
+      };
+    }, value);
+    await page.waitForTimeout(180);
+    const visual = await page.evaluate(() => {
+      const source = document.querySelector('#scene');
+      const probe = document.createElement('canvas');
+      probe.width = 240;
+      probe.height = 150;
+      const context = probe.getContext('2d', { willReadFrequently: true });
+      context.drawImage(source, 0, 0, probe.width, probe.height);
+      const pixels = context.getImageData(0, 0, probe.width, probe.height).data;
+      let litPixels = 0;
+      for (let index = 0; index < pixels.length; index += 4) {
+        const luminance = pixels[index] * 0.2126 + pixels[index + 1] * 0.7152 + pixels[index + 2] * 0.0722;
+        if (luminance > 12) {
+          litPixels += 1;
+        }
+      }
+      return { litPixels };
+    });
+    return { ...immediate, ...visual };
+  };
+
+  const low = await setDensity(0.22);
+  const high = await setDensity(0.86);
+  const quality = await page.evaluate(() => window.__particleDemoVerify.getState().qualityMode);
+  const report = { qualityMode: quality, low, high };
+
+  await page.close();
+  return report;
 }
 
 async function verifyAdaptiveTrackingFps() {
@@ -546,8 +652,7 @@ async function verifyProfile(profile) {
 
   const state = samples[samples.length - 1];
   const sampleSummary = summarizeSamples(samples);
-  const screenshot = await page.screenshot({ type: 'png' });
-  const lit = countLitSamples(screenshot);
+  const lit = await countLitCanvasPixels(page);
 
   if (state.mode !== 0) failures.push(`wrong mode ${state.mode}`);
   if (!state.handText.includes('HAND')) failures.push(`bad hand text ${state.handText}`);
@@ -652,14 +757,24 @@ function summarizeSamples(samples) {
   };
 }
 
-function countLitSamples(buffer) {
-  let lit = 0;
-  for (let index = 33; index < buffer.length - 4; index += 17) {
-    if (buffer[index] + buffer[index + 1] + buffer[index + 2] > 45) {
-      lit += 1;
+async function countLitCanvasPixels(page) {
+  return page.evaluate(() => {
+    const source = document.querySelector('#scene');
+    const probe = document.createElement('canvas');
+    probe.width = 240;
+    probe.height = 150;
+    const context = probe.getContext('2d', { willReadFrequently: true });
+    context.drawImage(source, 0, 0, probe.width, probe.height);
+    const pixels = context.getImageData(0, 0, probe.width, probe.height).data;
+    let lit = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const luminance = pixels[index] * 0.2126 + pixels[index + 1] * 0.7152 + pixels[index + 2] * 0.0722;
+      if (luminance > 12) {
+        lit += 1;
+      }
     }
-  }
-  return lit;
+    return lit;
+  });
 }
 
 function delay(ms) {
