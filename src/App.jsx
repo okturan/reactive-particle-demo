@@ -96,6 +96,7 @@ export default function App() {
       <video id="faceVideoBackdrop" className="face-video-backdrop" playsInline muted aria-hidden="true" />
       <canvas id="scene" aria-label="Reactive particle field" />
       <Hud />
+      <div id="hintBar" className="hint-bar" role="status" title="Click to dismiss" hidden />
       <TrackingDebug />
       <CalibrationPanel />
       <SettingsPanel />

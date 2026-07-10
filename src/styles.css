@@ -87,6 +87,39 @@ select {
   pointer-events: auto;
 }
 
+.hint-bar {
+  position: absolute;
+  left: 50%;
+  bottom: max(26px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid rgba(130, 226, 255, 0.24);
+  background: rgba(2, 3, 5, 0.72);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+  color: rgba(202, 244, 255, 0.94);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.45;
+  text-align: center;
+  letter-spacing: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity 0.45s ease;
+}
+
+.hint-bar.is-fading {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hint-bar[hidden] {
+  display: none;
+}
+
 .hand-debug {
   position: absolute;
   right: max(18px, env(safe-area-inset-right));
@@ -579,5 +612,10 @@ select {
 
   .debug-readout {
     height: 28px;
+  }
+
+  .hint-bar {
+    bottom: max(14px, env(safe-area-inset-bottom));
+    font-size: 10px;
   }
 }

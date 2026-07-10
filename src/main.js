@@ -329,6 +329,20 @@ const PARTICLE_SETTING_CONTROLS = [
 ];
 const HAND_FILTER = { kind: 'hand' };
 const FACE_FILTER = { kind: 'face' };
+// Camera states the per-frame SEARCH fallback must never clobber: setup progress,
+// in-flight camera work, and terminal failure states that carry recovery guidance.
+const STICKY_CAMERA_STATES = new Set([
+  'CAMERA',
+  'LOADING',
+  'SCANNING',
+  'SWITCHING',
+  'POINTER',
+  'CAM BLOCKED',
+  'NO CAMERA',
+  'CAM BUSY',
+  'CAM ERROR',
+  'NO TRACKING',
+]);
 const SETTING_SECTIONS = ['Shared', 'Hand', 'Face'];
 const FACE_POSITION_DEADZONE = 0.018;
 const FACE_SCALE_DEADZONE = 0.007;
@@ -354,6 +368,13 @@ const HAND_ASSIGNMENT_HANDEDNESS_LOCK_MS = 1600;
 const HAND_ASSIGNMENT_HANDEDNESS_PENALTY = 0.78;
 const EYE_IGNITION_START = 0.46;
 const EYE_IGNITION_END = 0.86;
+const HINT_MESSAGES = {
+  [TRACKING_MODES.HAND]:
+    'Show your hand to the camera — point to stir the particles, open your palm to push, pinch to pull. Clap for a shockwave.',
+  [TRACKING_MODES.FACE]:
+    'Look into the camera — the particles form a mask that follows your head. Blink, smile, and shake your head.',
+};
+const HINT_FADE_MS = 450;
 
 const canvas = document.querySelector('#scene');
 const app = document.querySelector('#app');
@@ -384,6 +405,7 @@ const perfStatus = document.querySelector('#perfStatus');
 const handDebugPanel = document.querySelector('#handDebug');
 const handModeButton = document.querySelector('#handModeButton');
 const faceModeButton = document.querySelector('#faceModeButton');
+const hintBar = document.querySelector('#hintBar');
 
 const pointer = {
   active: false,
@@ -448,6 +470,12 @@ let lastTwoHandDistance = 10;
 let cameraMode = 'CAMERA';
 let cameraSettings = { frameRate: 0, width: 0, height: 0 };
 let activeCameraDeviceId = '';
+let cameraRequestGeneration = 0;
+let hintFadeTimeoutId = 0;
+const hintSeen = {
+  [TRACKING_MODES.HAND]: false,
+  [TRACKING_MODES.FACE]: false,
+};
 let reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 let bloomPass;
 let renderPixelRatio = getInitialPixelRatio();
@@ -643,6 +671,7 @@ async function boot() {
   settingsReset.addEventListener('click', resetParticleSettings);
   handModeButton.addEventListener('click', () => setTrackingMode(TRACKING_MODES.HAND));
   faceModeButton.addEventListener('click', () => setTrackingMode(TRACKING_MODES.FACE));
+  hintBar.addEventListener('click', hideHint);
   setupCalibrationControls();
   setupParticleSettingsControls();
   updateModeControls();
@@ -1360,6 +1389,8 @@ async function setupHands() {
 
   if (!navigator.mediaDevices?.getUserMedia) {
     setCameraState('POINTER', 'warn');
+    showHint('This browser has no camera access — mouse mode is on. Move the cursor through the particles.');
+    enablePointerFallback();
     return;
   }
 
@@ -1369,8 +1400,21 @@ async function setupHands() {
       'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm',
     );
     await ensureLandmarkerForMode();
+  } catch (error) {
+    console.warn('Tracking model unavailable:', error);
+    setCameraState('NO TRACKING', 'offline');
+    showHint('The tracking models failed to load — check your network and reload.');
+    enablePointerFallback();
+    return;
+  }
 
-    let stream = await openBestCameraStream(await getPreferredCameraDeviceId());
+  const generation = cameraRequestGeneration;
+  try {
+    const stream = await openBestCameraStream(await getPreferredCameraDeviceId());
+    if (generation !== cameraRequestGeneration) {
+      stopStream(stream);
+      return;
+    }
     video.srcObject = stream;
     faceVideoBackdrop.srcObject = stream;
     const [videoTrack] = stream.getVideoTracks();
@@ -1379,10 +1423,82 @@ async function setupHands() {
     await Promise.all([video.play(), faceVideoBackdrop.play().catch(() => {})]);
     setCameraState('LIVE', '');
     startHandDetectionLoop();
+    showModeHint();
   } catch (error) {
     console.warn('Camera tracking unavailable:', error);
-    setCameraState('POINTER', 'warn');
+    if (generation !== cameraRequestGeneration) {
+      return;
+    }
+    reportCameraFailure(error);
+    enablePointerFallback();
+    populateCameraSelect().catch(() => {});
   }
+}
+
+function reportCameraFailure(error) {
+  const name = error?.name || '';
+  let state = 'CAM ERROR';
+  let tone = 'offline';
+  let message = 'The camera could not be started. Pick a camera to retry.';
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    state = 'CAM BLOCKED';
+    message = 'Camera permission was denied. Allow camera access for this site, then pick a camera or reload.';
+  } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'NotSupportedError') {
+    state = 'NO CAMERA';
+    message = 'No camera was found. Connect one, then press SCAN.';
+  } else if (name === 'NotReadableError' || name === 'TrackStartError' || name === 'AbortError') {
+    state = 'CAM BUSY';
+    tone = 'warn';
+    message = 'The camera is in use by another app. Close it, then pick a camera to retry.';
+  }
+  setCameraState(state, tone);
+  cameraStatus.title = message;
+  const mouseNote =
+    trackingMode === TRACKING_MODES.HAND ? ' Mouse mode is on meanwhile — move the cursor through the particles.' : '';
+  showHint(message + mouseNote);
+}
+
+function enablePointerFallback() {
+  if (trackingMode !== TRACKING_MODES.HAND || pointerEnabled) {
+    return;
+  }
+  pointerEnabled = true;
+  updatePointerToggle();
+}
+
+function showHint(text) {
+  if (verifyMode) {
+    return;
+  }
+  window.clearTimeout(hintFadeTimeoutId);
+  hintFadeTimeoutId = 0;
+  hintBar.textContent = text;
+  hintBar.hidden = false;
+  hintBar.classList.remove('is-fading');
+}
+
+function hideHint() {
+  if (hintBar.hidden || hintFadeTimeoutId) {
+    return;
+  }
+  hintBar.classList.add('is-fading');
+  hintFadeTimeoutId = window.setTimeout(() => {
+    hintFadeTimeoutId = 0;
+    hintBar.hidden = true;
+  }, HINT_FADE_MS);
+}
+
+function showModeHint() {
+  if (hintSeen[trackingMode]) {
+    hideHint();
+    return;
+  }
+  showHint(HINT_MESSAGES[trackingMode]);
+}
+
+function noteLiveTrackingForHint(mode) {
+  hintSeen[mode] = true;
+  hideHint();
 }
 
 function setupSyntheticHandInput() {
@@ -1720,19 +1836,26 @@ async function getPreferredCameraDeviceId() {
 }
 
 async function refreshCameraDevices() {
+  const generation = cameraRequestGeneration;
   const selectedDeviceId = activeCameraDeviceId || cameraSettings.deviceId || cameraSelect.value;
   try {
     cameraRefreshButton.disabled = true;
     setCameraState('SCANNING', 'warn');
     await populateCameraSelect(selectedDeviceId);
-    setCameraState(video.srcObject ? 'LIVE' : 'CAMERA', '');
+    if (generation === cameraRequestGeneration) {
+      setCameraState(video.srcObject ? 'LIVE' : 'CAMERA', '');
+    }
   } finally {
     cameraRefreshButton.disabled = false;
   }
 }
 
 async function populateCameraSelect(selectedDeviceId = '') {
+  const generation = cameraRequestGeneration;
   const devices = await getVideoInputDevices();
+  if (generation !== cameraRequestGeneration) {
+    return;
+  }
   cameraSelect.innerHTML = '';
 
   const defaultOption = document.createElement('option');
@@ -1774,29 +1897,43 @@ async function handleCameraSelection() {
     return;
   }
 
+  const generation = ++cameraRequestGeneration;
   try {
     setCameraState('SWITCHING', 'warn');
     if (useBrowserDefault) {
       clearSavedCameraDeviceId();
     }
     const stream = await openBestCameraStream(useBrowserDefault ? '' : deviceId, useBrowserDefault);
+    if (generation !== cameraRequestGeneration) {
+      stopStream(stream);
+      return;
+    }
     stopStream(video.srcObject);
     video.srcObject = stream;
     faceVideoBackdrop.srcObject = stream;
     await Promise.all([video.play(), faceVideoBackdrop.play().catch(() => {})]);
+    if (generation !== cameraRequestGeneration) {
+      return;
+    }
     const [track] = stream.getVideoTracks();
     updateCameraSettings(track?.getSettings?.() || {});
     const actualDeviceId = track?.getSettings?.().deviceId || (useBrowserDefault ? '' : deviceId);
     await populateCameraSelect(actualDeviceId);
+    if (generation !== cameraRequestGeneration) {
+      return;
+    }
     if (actualDeviceId) {
       saveCameraDeviceId(actualDeviceId);
     }
     resetTrackingForStreamChange();
     startHandDetectionLoop();
     setCameraState('LIVE', '');
+    showModeHint();
   } catch (error) {
     console.warn('Camera switch failed:', error);
-    setCameraState('CAMERA ERR', 'offline');
+    if (generation === cameraRequestGeneration) {
+      setCameraState('CAMERA ERR', 'offline');
+    }
   }
 }
 
@@ -1977,7 +2114,9 @@ function ensureFaceLandmarker() {
 function requestLandmarkerForMode() {
   ensureLandmarkerForMode().catch((error) => {
     console.warn('Tracking model unavailable:', error);
-    setCameraState('TRACK ERR', 'offline');
+    setCameraState('NO TRACKING', 'offline');
+    showHint('The tracking model failed to load — check your network and reload.');
+    enablePointerFallback();
   });
 }
 
@@ -2130,6 +2269,7 @@ function updateTrackingHealth(mode, liveCount, heldCount = 0) {
     trackingHealth.lastLiveAt = now;
     trackingHealth.missCount = 0;
     trackingHealth.staleMs = 0;
+    noteLiveTrackingForHint(mode);
     return;
   }
 
@@ -3208,6 +3348,9 @@ function getFaceMatrixMetrics(faceResult) {
   const matrix = faceResult?.facialTransformationMatrixes?.[0];
   const data = matrix?.data;
   if (!data || data.length < 16) {
+    return null;
+  }
+  if (!Number.isFinite(data[0]) || !Number.isFinite(data[4]) || !Number.isFinite(data[8])) {
     return null;
   }
 
@@ -4292,7 +4435,10 @@ function setTrackingMode(mode) {
   updateModeControls();
   updateCalibrationToggle();
   updateSettingsModeState();
-  setCameraState('LIVE', '');
+  if (video.srcObject || syntheticHandMode) {
+    setCameraState('LIVE', '');
+    showModeHint();
+  }
   requestLandmarkerForMode();
 }
 
@@ -4363,7 +4509,7 @@ function drawTrackingDebug(handState, faceState) {
     setCameraState('HELD HAND', 'warn');
   } else if (!handMode && faceCount) {
     setCameraState(faceState.held ? 'HELD FACE' : '1 FACE', faceState.held ? 'warn' : '');
-  } else if (cameraMode !== 'POINTER' && cameraMode !== 'LOADING') {
+  } else if (!STICKY_CAMERA_STATES.has(cameraMode)) {
     setCameraState('SEARCH', 'warn');
   }
 
