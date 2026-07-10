@@ -29,6 +29,15 @@ function Hud() {
         <button id="settingsToggle" className="pointer-toggle" type="button" aria-pressed="false">
           SETTINGS
         </button>
+        <button
+          id="fullscreenToggle"
+          className="pointer-toggle"
+          type="button"
+          aria-pressed="false"
+          title="Toggle fullscreen"
+        >
+          FULL
+        </button>
         <div id="perfStatus" className="status perf-status">
           -- FPS
         </div>

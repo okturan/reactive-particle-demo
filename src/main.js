@@ -6,375 +6,29 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { FaceLandmarker, FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import logoUrl from '../logomark-dark.svg?url';
 
-const PARTICLE_COUNT = 100_000;
-const MIN_PARTICLE_COUNT = 18_000;
-const DEFAULT_PARTICLE_COUNT = 54_000;
-const MAX_FORCES = 10;
-const TARGET_RENDER_FPS = 60;
-const FPS_DISPLAY_CAP = 60;
-const MIN_RENDER_FRAME_MS = 1000 / TARGET_RENDER_FPS;
-const FRAME_SKIP_EPSILON_MS = 0.1;
-const MIN_ADAPTIVE_TRACKING_FPS = 30;
-const FORCE_LOOP_EPSILON = 0.02;
-const TRACKING_MODES = {
-  HAND: 'hand',
-  FACE: 'face',
-};
-const CAMERA_STORAGE_KEY = 'particle-demo-camera-device-id';
-const CALIBRATION_STORAGE_KEY = 'particle-demo-face-calibration';
-const PARTICLE_SETTINGS_STORAGE_KEY = 'particle-demo-particle-settings';
-const DEFAULT_CAMERA_VALUE = '__particle_demo_browser_default_camera__';
-const PHONE_CAMERA_PATTERN = /iphone|continuity|ipad|phone/i;
-const HAND_TIP_INDICES = [4, 8, 12, 16, 20];
-const HAND_TIP_SET = new Set(HAND_TIP_INDICES);
-const HAND_TIP_SLOTS = new Map(HAND_TIP_INDICES.map((tip, index) => [tip, index]));
-const FINGER_CHAINS = [
-  { tip: 4, dip: 3, pip: 2, mcp: 1 },
-  { tip: 8, dip: 7, pip: 6, mcp: 5 },
-  { tip: 12, dip: 11, pip: 10, mcp: 9 },
-  { tip: 16, dip: 15, pip: 14, mcp: 13 },
-  { tip: 20, dip: 19, pip: 18, mcp: 17 },
-];
-const LONG_FINGER_TIPS = [8, 12, 16, 20];
-const HAND_CONNECTIONS = [
-  [0, 1],
-  [1, 2],
-  [2, 3],
-  [3, 4],
-  [0, 5],
-  [5, 6],
-  [6, 7],
-  [7, 8],
-  [5, 9],
-  [9, 10],
-  [10, 11],
-  [11, 12],
-  [9, 13],
-  [13, 14],
-  [14, 15],
-  [15, 16],
-  [13, 17],
-  [0, 17],
-  [17, 18],
-  [18, 19],
-  [19, 20],
-];
-const FACE_LANDMARKS = {
-  top: 10,
-  chin: 152,
-  leftCheek: 234,
-  rightCheek: 454,
-  leftEye: 33,
-  rightEye: 263,
-  leftEyeInner: 133,
-  rightEyeInner: 362,
-  leftEyeTop: 159,
-  leftEyeBottom: 145,
-  rightEyeTop: 386,
-  rightEyeBottom: 374,
-  leftTemple: 127,
-  rightTemple: 356,
-  leftJaw: 172,
-  rightJaw: 397,
-  nose: 1,
-  mouthTop: 13,
-  mouthBottom: 14,
-  mouthLeft: 61,
-  mouthRight: 291,
-};
-const FACE_DEBUG_POINTS = [
-  10, 21, 54, 67, 103, 109, 127, 132, 136, 148, 152, 162, 172, 176, 234, 251, 284, 297,
-  323, 332, 356, 361, 365, 377, 389, 397, 454, 1, 4, 33, 61, 70, 105, 133, 145, 159, 263,
-  291, 300, 334, 362, 374, 386,
-];
-const LOGO_FACE_ANCHORS = {
-  eyeMid: new THREE.Vector2(0, 0.58),
-  noseTip: new THREE.Vector2(0.08, -0.34),
-  mouth: new THREE.Vector2(-0.02, -1.3),
-  eyeToMouth: 1.82,
-  cheekWidth: 5.55,
-};
-const DEFAULT_FACE_EYE_ANCHORS = new THREE.Vector4(-1.08, 0.58, 1.08, 0.58);
-const DEFAULT_FACE_CALIBRATION = {
-  maskScale: 1.22,
-  maskX: 0,
-  maskY: 0.13,
-  eyeOriginX: 0,
-  eyeOriginY: 0.13,
-  eyeSpread: 1.31,
-  eyeHeight: 1,
-  eyeScale: 0.92,
-  eyeShape: 1.75,
-  eyeIntensity: 1.73,
-  blinkResponse: 1.15,
-};
-const CALIBRATION_CONTROLS = [
-  { key: 'maskScale', label: 'Mask scale', min: 0.75, max: 1.45, step: 0.01 },
-  { key: 'maskX', label: 'Mask origin X', min: -1.2, max: 1.2, step: 0.01 },
-  { key: 'maskY', label: 'Mask origin Y', min: -1.2, max: 1.2, step: 0.01 },
-  { key: 'eyeOriginX', label: 'Eye origin X', min: -0.8, max: 0.8, step: 0.01 },
-  { key: 'eyeOriginY', label: 'Eye origin Y', min: -0.8, max: 0.8, step: 0.01 },
-  { key: 'eyeSpread', label: 'Eye spread', min: 0.55, max: 1.6, step: 0.01 },
-  { key: 'eyeHeight', label: 'Eye height', min: 0.35, max: 2.1, step: 0.01 },
-  { key: 'eyeScale', label: 'Eye beam size', min: 0.35, max: 2.4, step: 0.01 },
-  { key: 'eyeShape', label: 'Eye sharpness', min: 0.45, max: 2.2, step: 0.01 },
-  { key: 'eyeIntensity', label: 'Eye intensity', min: 0, max: 2.4, step: 0.01 },
-  { key: 'blinkResponse', label: 'Blink response', min: 0, max: 2.2, step: 0.01 },
-];
-const DEFAULT_PARTICLE_SETTINGS = {
-  handSmoothing: 0.76,
-  handDeadzone: 0.018,
-  handMaxStep: 0.16,
-  trackingFps: 45,
-  fingerStrength: 1.08,
-  palmStrength: 1.56,
-  pinchStrength: 0.96,
-  particleForce: 1.16,
-  particleCurl: 0.96,
-  particleDepth: 1.18,
-  handContactRadius: 1,
-  handPalmRadius: 1.36,
-  handPinchReach: 1,
-  handWake: 1.16,
-  idleMotion: 0.78,
-  particleDensity: 0.54,
-  bloom: 0.45,
-  faceCameraOpacity: 0.42,
-  faceFollow: 0.82,
-  faceMotion: 2.2,
-};
-const PARTICLE_SETTING_CONTROLS = [
-  {
-    key: 'handSmoothing',
-    section: 'Hand',
-    label: 'Hand smooth',
-    min: 0,
-    max: 0.92,
-    step: 0.01,
-    hint: 'Higher values reduce fingertip jitter, with a little more input lag.',
-  },
-  {
-    key: 'handDeadzone',
-    section: 'Hand',
-    label: 'Deadzone',
-    min: 0,
-    max: 0.08,
-    step: 0.001,
-    precision: 3,
-    hint: 'Ignores tiny landmark noise before it reaches the particle force field.',
-  },
-  {
-    key: 'handMaxStep',
-    section: 'Hand',
-    label: 'Max jump',
-    min: 0.08,
-    max: 0.5,
-    step: 0.01,
-    hint: 'Limits how far a tracked point can move in one frame after filtering.',
-  },
-  {
-    key: 'trackingFps',
-    section: 'Shared',
-    label: 'Track FPS',
-    min: 24,
-    max: 60,
-    step: 1,
-    precision: 0,
-    hint: 'Caps MediaPipe inference separately from the 60 FPS renderer.',
-  },
-  {
-    key: 'fingerStrength',
-    section: 'Hand',
-    label: 'Finger force',
-    min: 0,
-    max: 1.5,
-    step: 0.01,
-    hint: 'Scales each fingertip repulsion field before it enters the shader.',
-  },
-  {
-    key: 'palmStrength',
-    section: 'Hand',
-    label: 'Palm force',
-    min: 0,
-    max: 1.5,
-    step: 0.01,
-    hint: 'Scales the open-palm pressure field that blooms the cloud outward.',
-  },
-  {
-    key: 'pinchStrength',
-    section: 'Hand',
-    label: 'Pinch force',
-    min: 0,
-    max: 1.5,
-    step: 0.01,
-    hint: 'Scales the pinch gravity well and vortex effect.',
-  },
-  {
-    key: 'particleForce',
-    section: 'Hand',
-    label: 'Field power',
-    min: 0,
-    max: 1.6,
-    step: 0.01,
-    hint: 'Global multiplier for hand-driven particle displacement.',
-  },
-  {
-    key: 'particleCurl',
-    section: 'Hand',
-    label: 'Curl',
-    min: 0,
-    max: 1.8,
-    step: 0.01,
-    hint: 'Adds sideways swirl to finger wakes, pinches, gusts, and shockwaves.',
-  },
-  {
-    key: 'particleDepth',
-    section: 'Hand',
-    label: 'Depth push',
-    min: 0,
-    max: 1.8,
-    step: 0.01,
-    hint: 'Controls how much hand forces push particles toward the camera.',
-  },
-  {
-    key: 'handContactRadius',
-    section: 'Hand',
-    label: 'Contact size',
-    min: 0.55,
-    max: 1.75,
-    step: 0.01,
-    hint: 'Scales fingertip contact radius. Lower values make finger pushes more precise.',
-  },
-  {
-    key: 'handPalmRadius',
-    section: 'Hand',
-    label: 'Palm reach',
-    min: 0.55,
-    max: 1.75,
-    step: 0.01,
-    hint: 'Scales the open-palm pressure disk without changing fingertip size.',
-  },
-  {
-    key: 'handPinchReach',
-    section: 'Hand',
-    label: 'Pinch reach',
-    min: 0.55,
-    max: 1.8,
-    step: 0.01,
-    hint: 'Controls how far the pinch gravity well reaches into the particle cloud.',
-  },
-  {
-    key: 'handWake',
-    section: 'Hand',
-    label: 'Wake',
-    min: 0,
-    max: 1.8,
-    step: 0.01,
-    hint: 'Scales velocity trails from fast hand and finger movement.',
-  },
-  {
-    key: 'idleMotion',
-    section: 'Shared',
-    label: 'Idle sway',
-    min: 0,
-    max: 1.6,
-    step: 0.01,
-    hint: 'Controls the logo cloud breathing motion when no hand force is active.',
-  },
-  {
-    key: 'particleDensity',
-    section: 'Shared',
-    label: 'Density',
-    min: 0.18,
-    max: 1,
-    step: 0.01,
-    hint: 'Caps how many particles are drawn; lower this first for stable FPS.',
-  },
-  {
-    key: 'bloom',
-    section: 'Shared',
-    label: 'Bloom',
-    min: 0,
-    max: 1.4,
-    step: 0.01,
-    hint: 'Controls post-process glow and particle emission brightness.',
-  },
-  {
-    key: 'faceCameraOpacity',
-    section: 'Face',
-    label: 'Camera opacity',
-    min: 0,
-    max: 0.78,
-    step: 0.01,
-    hint: 'Controls the webcam backdrop opacity in face mode only.',
-  },
-  {
-    key: 'faceFollow',
-    section: 'Face',
-    label: 'Face follow',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    hint: '0 makes the mask trail behind your face. 1 locks it almost instantly to your face.',
-  },
-  {
-    key: 'faceMotion',
-    section: 'Face',
-    label: 'Head shake',
-    min: 0,
-    max: 4,
-    step: 0.01,
-    hint: 'Scales the visible particle wobble, swirl, and depth kick when you move your head fast.',
-  },
-];
-const HAND_FILTER = { kind: 'hand' };
-const FACE_FILTER = { kind: 'face' };
-// Camera states the per-frame SEARCH fallback must never clobber: setup progress,
-// in-flight camera work, and terminal failure states that carry recovery guidance.
-const STICKY_CAMERA_STATES = new Set([
-  'CAMERA',
-  'LOADING',
-  'SCANNING',
-  'SWITCHING',
-  'POINTER',
-  'CAM BLOCKED',
-  'NO CAMERA',
-  'CAM BUSY',
-  'CAM ERROR',
-  'NO TRACKING',
-]);
-const SETTING_SECTIONS = ['Shared', 'Hand', 'Face'];
-const FACE_POSITION_DEADZONE = 0.018;
-const FACE_SCALE_DEADZONE = 0.007;
-const FACE_ROLL_DEADZONE = 0.01;
-const FACE_EXPRESSION_DEADZONE = 0.025;
-const FACE_EYE_ANCHOR_DEADZONE = 0.035;
-const FACE_JUMP_CONTAIN_START = 0.42;
-const FACE_JUMP_CONTAIN_END = 1.12;
-const FACE_SCALE_MAX_STEP = 0.045;
-const FACE_ROLL_MAX_STEP = 0.075;
-const FACE_YAW_MAX_STEP = 0.12;
-const FACE_EYE_ANCHOR_MAX_STEP = 0.24;
-const FACE_RESULT_FRESH_MS = 420;
-const FACE_DROPOUT_HOLD_MS = 420;
-const FACE_CACHE_RESET_GRACE_MS = 1100;
-const HAND_RESULT_FRESH_MS = 560;
-const HAND_DROPOUT_HOLD_MS = 1050;
-const HAND_SLOT_RESET_GRACE_MS = 1700;
-const HAND_MIN_TRACKING_CONFIDENCE = 0.38;
-const HAND_MIN_FRAME_QUALITY = 0.28;
-const HAND_ASSIGNMENT_SWITCH_MARGIN = 0.24;
-const HAND_ASSIGNMENT_HANDEDNESS_LOCK_MS = 1600;
-const HAND_ASSIGNMENT_HANDEDNESS_PENALTY = 0.78;
-const EYE_IGNITION_START = 0.46;
-const EYE_IGNITION_END = 0.86;
-const HINT_MESSAGES = {
-  [TRACKING_MODES.HAND]:
-    'Show your hand to the camera — point to stir the particles, open your palm to push, pinch to pull. Clap for a shockwave.',
-  [TRACKING_MODES.FACE]:
-    'Look into the camera — the particles form a mask that follows your head. Blink, smile, and shake your head.',
-};
-const HINT_FADE_MS = 450;
+import {
+  PARTICLE_COUNT, MIN_PARTICLE_COUNT, DEFAULT_PARTICLE_COUNT, MAX_FORCES, TARGET_RENDER_FPS,
+  FPS_DISPLAY_CAP, MIN_RENDER_FRAME_MS, FRAME_SKIP_EPSILON_MS, MIN_ADAPTIVE_TRACKING_FPS,
+  FORCE_LOOP_EPSILON, TRACKING_MODES, CAMERA_STORAGE_KEY, CALIBRATION_STORAGE_KEY,
+  PARTICLE_SETTINGS_STORAGE_KEY, DEFAULT_CAMERA_VALUE, PHONE_CAMERA_PATTERN, HAND_TIP_INDICES,
+  HAND_TIP_SET, HAND_TIP_SLOTS, FINGER_CHAINS, LONG_FINGER_TIPS, HAND_CONNECTIONS, FACE_LANDMARKS,
+  FACE_DEBUG_POINTS, LOGO_FACE_ANCHORS, DEFAULT_FACE_EYE_ANCHORS, DEFAULT_FACE_CALIBRATION,
+  CALIBRATION_CONTROLS, DEFAULT_PARTICLE_SETTINGS, PARTICLE_SETTING_CONTROLS, HAND_FILTER,
+  FACE_FILTER, STICKY_CAMERA_STATES, SETTING_SECTIONS, FACE_POSITION_DEADZONE, FACE_SCALE_DEADZONE,
+  FACE_ROLL_DEADZONE, FACE_EXPRESSION_DEADZONE, FACE_EYE_ANCHOR_DEADZONE, FACE_JUMP_CONTAIN_START,
+  FACE_JUMP_CONTAIN_END, FACE_SCALE_MAX_STEP, FACE_ROLL_MAX_STEP, FACE_YAW_MAX_STEP,
+  FACE_EYE_ANCHOR_MAX_STEP, FACE_RESULT_FRESH_MS, FACE_DROPOUT_HOLD_MS, FACE_CACHE_RESET_GRACE_MS,
+  HAND_RESULT_FRESH_MS, HAND_DROPOUT_HOLD_MS, HAND_SLOT_RESET_GRACE_MS, HAND_MIN_TRACKING_CONFIDENCE,
+  HAND_MIN_FRAME_QUALITY, HAND_ASSIGNMENT_SWITCH_MARGIN, HAND_ASSIGNMENT_HANDEDNESS_LOCK_MS,
+  HAND_ASSIGNMENT_HANDEDNESS_PENALTY, EYE_IGNITION_START, EYE_IGNITION_END, HINT_MESSAGES,
+  HINT_FADE_MS,
+} from './engine/constants.js';
+import {
+  distance2d, distance3d, getJointStraightness, smoothstep, dampStableScalar,
+  dampStableScalarLimited, dampStableAngle, dampStableAngleLimited, dampStableVector4,
+  dampStableVector4Limited, lerpAngle, randomSigned,
+} from './engine/math.js';
+import { vertexShader, fragmentShader } from './engine/shaders.js';
 
 const canvas = document.querySelector('#scene');
 const app = document.querySelector('#app');
@@ -405,6 +59,7 @@ const perfStatus = document.querySelector('#perfStatus');
 const handDebugPanel = document.querySelector('#handDebug');
 const handModeButton = document.querySelector('#handModeButton');
 const faceModeButton = document.querySelector('#faceModeButton');
+const fullscreenToggle = document.querySelector('#fullscreenToggle');
 const hintBar = document.querySelector('#hintBar');
 
 const pointer = {
@@ -512,6 +167,7 @@ const smoothedFace = {
   strength: 0,
 };
 const handDebugContext = handOverlay.getContext('2d');
+const debugPointPool = Array.from({ length: 6 }, () => ({ x: 0, y: 0 }));
 const clock = new THREE.Clock();
 const uniforms = {
   uTime: { value: 0 },
@@ -565,7 +221,6 @@ const uniforms = {
 const tmpForceUniform = new THREE.Vector4();
 const tmpPalmUniform = new THREE.Vector4();
 const tmpPinchUniform = new THREE.Vector4();
-const tmpVector4 = new THREE.Vector4();
 const uploadedForceSourceIds = Array.from({ length: MAX_FORCES }, () => -1);
 const reusableHandState = createHandState();
 const handScratchFingerScores = Array.from({ length: 2 }, () =>
@@ -672,6 +327,20 @@ async function boot() {
   handModeButton.addEventListener('click', () => setTrackingMode(TRACKING_MODES.HAND));
   faceModeButton.addEventListener('click', () => setTrackingMode(TRACKING_MODES.FACE));
   hintBar.addEventListener('click', hideHint);
+  hintBar.addEventListener('transitionend', () => {
+    if (hintBar.classList.contains('is-fading')) {
+      window.clearTimeout(hintFadeTimeoutId);
+      hintFadeTimeoutId = 0;
+      hintBar.hidden = true;
+    }
+  });
+  setupFullscreenToggle();
+  window
+    .matchMedia('(prefers-reduced-motion: reduce)')
+    .addEventListener?.('change', (event) => {
+      reducedMotion = event.matches;
+      applyParticleSettings();
+    });
   setupCalibrationControls();
   setupParticleSettingsControls();
   updateModeControls();
@@ -721,6 +390,16 @@ function setupScene() {
   starField = createStarField();
   scene.add(starField);
   setupInteractionMarkers();
+
+  canvas.addEventListener('webglcontextlost', (event) => {
+    event.preventDefault();
+    setCameraState('GPU LOST', 'offline');
+    showHint('The graphics context was lost — rendering is paused. It usually recovers on its own; reload if it does not.');
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    setCameraState(video.srcObject ? 'LIVE' : 'CAMERA', '');
+    hideHint();
+  });
 }
 
 function installVerifyHooks() {
@@ -1424,6 +1103,7 @@ async function setupHands() {
     setCameraState('LIVE', '');
     startHandDetectionLoop();
     showModeHint();
+    schedulePeerLandmarkerPrefetch();
   } catch (error) {
     console.warn('Camera tracking unavailable:', error);
     if (generation !== cameraRequestGeneration) {
@@ -1433,6 +1113,16 @@ async function setupHands() {
     enablePointerFallback();
     populateCameraSelect().catch(() => {});
   }
+}
+
+// Warm the inactive mode's landmarker in the background so the first HAND/FACE
+// switch does not stall on a multi-megabyte model download.
+function schedulePeerLandmarkerPrefetch() {
+  window.setTimeout(() => {
+    const prefetch =
+      trackingMode === TRACKING_MODES.FACE ? ensureHandLandmarker(true) : ensureFaceLandmarker(true);
+    prefetch.catch(() => {});
+  }, 3500);
 }
 
 function reportCameraFailure(error) {
@@ -2067,7 +1757,7 @@ function ensureLandmarkerForMode() {
   return trackingMode === TRACKING_MODES.FACE ? ensureFaceLandmarker() : ensureHandLandmarker();
 }
 
-function ensureHandLandmarker() {
+function ensureHandLandmarker(silent = false) {
   if (handLandmarker) {
     return Promise.resolve(handLandmarker);
   }
@@ -2075,7 +1765,9 @@ function ensureHandLandmarker() {
     return Promise.resolve(null);
   }
   if (!handLandmarkerPromise) {
-    setCameraState('HAND MODEL', 'warn');
+    if (!silent) {
+      setCameraState('HAND MODEL', 'warn');
+    }
     handLandmarkerPromise = createHandLandmarker(visionFileset)
       .then((landmarker) => {
         handLandmarker = landmarker;
@@ -2089,7 +1781,7 @@ function ensureHandLandmarker() {
   return handLandmarkerPromise;
 }
 
-function ensureFaceLandmarker() {
+function ensureFaceLandmarker(silent = false) {
   if (faceLandmarker) {
     return Promise.resolve(faceLandmarker);
   }
@@ -2097,7 +1789,9 @@ function ensureFaceLandmarker() {
     return Promise.resolve(null);
   }
   if (!faceLandmarkerPromise) {
-    setCameraState('FACE MODEL', 'warn');
+    if (!silent) {
+      setCameraState('FACE MODEL', 'warn');
+    }
     faceLandmarkerPromise = createFaceLandmarker(visionFileset)
       .then((landmarker) => {
         faceLandmarker = landmarker;
@@ -3872,6 +3566,9 @@ function getFingerExtensionScores(landmarks, metrics = getHandMetrics(landmarks)
 
 function animate(frameTime = 0) {
   requestAnimationFrame(animate);
+  if (document.hidden) {
+    return;
+  }
   const renderTimestamp = frameTime || performance.now();
   if (lastRenderAt && renderTimestamp - lastRenderAt < MIN_RENDER_FRAME_MS - FRAME_SKIP_EPSILON_MS) {
     return;
@@ -4053,6 +3750,25 @@ function updatePointerToggle() {
   }
   pointerToggle.setAttribute('aria-pressed', String(pointerEnabled));
   pointerToggle.textContent = pointerEnabled ? 'MOUSE ON' : 'MOUSE OFF';
+}
+
+function setupFullscreenToggle() {
+  if (!document.documentElement.requestFullscreen) {
+    fullscreenToggle.hidden = true;
+    return;
+  }
+  fullscreenToggle.addEventListener('click', () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  });
+  document.addEventListener('fullscreenchange', () => {
+    const active = Boolean(document.fullscreenElement);
+    fullscreenToggle.setAttribute('aria-pressed', String(active));
+    fullscreenToggle.textContent = active ? 'EXIT FULL' : 'FULL';
+  });
 }
 
 function toggleDebugPanel() {
@@ -4288,11 +4004,12 @@ function createParticleSettingRow(control) {
 }
 
 function applyParticleSettings({ syncParticleCount = false } = {}) {
+  const motionScale = reducedMotion ? 0.3 : 1;
   uniforms.uMotionSettings.value.set(
     particleSettings.particleForce,
     particleSettings.particleCurl,
     particleSettings.particleDepth,
-    particleSettings.idleMotion,
+    particleSettings.idleMotion * motionScale,
   );
   uniforms.uHandTuning.value.set(
     particleSettings.handContactRadius,
@@ -4303,7 +4020,7 @@ function applyParticleSettings({ syncParticleCount = false } = {}) {
   uniforms.uVisualSettings.value.set(
     particleSettings.bloom,
     particleSettings.faceFollow,
-    particleSettings.faceMotion,
+    particleSettings.faceMotion * motionScale,
     0,
   );
   app.style.setProperty('--face-camera-opacity', particleSettings.faceCameraOpacity.toFixed(3));
@@ -4615,8 +4332,8 @@ function drawHandConnections(landmarks, videoRect) {
   handDebugContext.lineWidth = Math.max(1.4, videoRect.width * 0.006);
 
   for (const [start, end] of HAND_CONNECTIONS) {
-    const from = landmarkToDebugPoint(landmarks[start], videoRect);
-    const to = landmarkToDebugPoint(landmarks[end], videoRect);
+    const from = setDebugPoint(debugPointPool[0], landmarks[start], videoRect);
+    const to = setDebugPoint(debugPointPool[1], landmarks[end], videoRect);
     handDebugContext.beginPath();
     handDebugContext.moveTo(from.x, from.y);
     handDebugContext.lineTo(to.x, to.y);
@@ -4626,7 +4343,7 @@ function drawHandConnections(landmarks, videoRect) {
 
 function drawHandPoints(landmarks, videoRect) {
   for (let index = 0; index < landmarks.length; index += 1) {
-    const point = landmarkToDebugPoint(landmarks[index], videoRect);
+    const point = setDebugPoint(debugPointPool[0], landmarks[index], videoRect);
     const isTip = HAND_TIP_SET.has(index);
     handDebugContext.beginPath();
     handDebugContext.arc(
@@ -4640,11 +4357,11 @@ function drawHandPoints(landmarks, videoRect) {
     handDebugContext.fill();
   }
 
-  const pinch = getPinch(landmarks, null, 1 / 30);
-  if (pinch.strength > 0.08) {
-    const thumb = landmarkToDebugPoint(landmarks[4], videoRect);
-    const index = landmarkToDebugPoint(landmarks[8], videoRect);
-    handDebugContext.strokeStyle = `rgba(255, 222, 110, ${0.35 + pinch.strength * 0.65})`;
+  const pinchStrength = getDebugPinchStrength(landmarks);
+  if (pinchStrength > 0.08) {
+    const thumb = setDebugPoint(debugPointPool[0], landmarks[4], videoRect);
+    const index = setDebugPoint(debugPointPool[1], landmarks[8], videoRect);
+    handDebugContext.strokeStyle = `rgba(255, 222, 110, ${0.35 + pinchStrength * 0.65})`;
     handDebugContext.lineWidth = Math.max(2, videoRect.width * 0.01);
     handDebugContext.beginPath();
     handDebugContext.moveTo(thumb.x, thumb.y);
@@ -4653,12 +4370,22 @@ function drawHandPoints(landmarks, videoRect) {
   }
 }
 
+// Cosmetic-only pinch estimate for the debug overlay: same distance ratio as getPinch,
+// without the finger-extension modulation, scene projection, or velocity filtering.
+function getDebugPinchStrength(landmarks) {
+  const thumb = landmarks[4];
+  const index = landmarks[8];
+  const distance = Math.hypot(thumb.x - index.x, thumb.y - index.y, (thumb.z - index.z) * 0.4);
+  const palmWidth = Math.max(distance2d(landmarks[5], landmarks[17]), 0.001);
+  return smoothstep(0.62, 0.28, distance / palmWidth);
+}
+
 function drawFaceDebug(landmarks, videoRect) {
-  const top = landmarkToDebugPoint(landmarks[FACE_LANDMARKS.top], videoRect);
-  const chin = landmarkToDebugPoint(landmarks[FACE_LANDMARKS.chin], videoRect);
-  const leftCheek = landmarkToDebugPoint(landmarks[FACE_LANDMARKS.leftCheek], videoRect);
-  const rightCheek = landmarkToDebugPoint(landmarks[FACE_LANDMARKS.rightCheek], videoRect);
-  const center = landmarkToDebugPoint(landmarks[FACE_LANDMARKS.nose], videoRect);
+  const top = setDebugPoint(debugPointPool[0], landmarks[FACE_LANDMARKS.top], videoRect);
+  const chin = setDebugPoint(debugPointPool[1], landmarks[FACE_LANDMARKS.chin], videoRect);
+  const leftCheek = setDebugPoint(debugPointPool[2], landmarks[FACE_LANDMARKS.leftCheek], videoRect);
+  const rightCheek = setDebugPoint(debugPointPool[3], landmarks[FACE_LANDMARKS.rightCheek], videoRect);
+  const center = setDebugPoint(debugPointPool[4], landmarks[FACE_LANDMARKS.nose], videoRect);
   const width = Math.max(8, Math.abs(rightCheek.x - leftCheek.x));
   const height = Math.max(8, Math.abs(chin.y - top.y));
 
@@ -4681,7 +4408,7 @@ function drawFaceDebug(landmarks, videoRect) {
     if (!landmark) {
       continue;
     }
-    const point = landmarkToDebugPoint(landmark, videoRect);
+    const point = setDebugPoint(debugPointPool[5], landmark, videoRect);
     handDebugContext.beginPath();
     handDebugContext.arc(point.x, point.y, videoRect.width * 0.0065, 0, Math.PI * 2);
     handDebugContext.fillStyle = 'rgba(250, 251, 252, 0.78)';
@@ -4689,390 +4416,10 @@ function drawFaceDebug(landmarks, videoRect) {
   }
 }
 
-function landmarkToDebugPoint(landmark, videoRect) {
-  return {
-    x: videoRect.x + (1 - landmark.x) * videoRect.width,
-    y: videoRect.y + landmark.y * videoRect.height,
-  };
+function setDebugPoint(target, landmark, videoRect) {
+  target.x = videoRect.x + (1 - landmark.x) * videoRect.width;
+  target.y = videoRect.y + landmark.y * videoRect.height;
+  return target;
 }
 
-function distance2d(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
 
-function distance3d(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
-}
-
-function getJointStraightness(base, joint, tip) {
-  const baseVector = { x: base.x - joint.x, y: base.y - joint.y };
-  const tipVector = { x: tip.x - joint.x, y: tip.y - joint.y };
-  const baseLength = Math.hypot(baseVector.x, baseVector.y);
-  const tipLength = Math.hypot(tipVector.x, tipVector.y);
-  if (baseLength < 0.0001 || tipLength < 0.0001) {
-    return 0;
-  }
-
-  const dot = (baseVector.x * tipVector.x + baseVector.y * tipVector.y) / (baseLength * tipLength);
-  return smoothstep(0.32, 0.92, (-dot + 1) * 0.5);
-}
-
-function smoothstep(edge0, edge1, value) {
-  const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-}
-
-function dampStableScalar(current, target, alpha, deadzone) {
-  const delta = target - current;
-  const distance = Math.abs(delta);
-  if (distance < deadzone) {
-    return current + delta * alpha * 0.08;
-  }
-  const weightedAlpha = alpha * THREE.MathUtils.clamp((distance - deadzone) / Math.max(deadzone * 3, 0.001), 0.18, 1);
-  return THREE.MathUtils.lerp(current, target, weightedAlpha);
-}
-
-function dampStableScalarLimited(current, target, alpha, deadzone, maxStep) {
-  const next = dampStableScalar(current, target, alpha, deadzone);
-  return current + THREE.MathUtils.clamp(next - current, -maxStep, maxStep);
-}
-
-function dampStableAngle(current, target, alpha, deadzone) {
-  const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
-  const distance = Math.abs(delta);
-  if (distance < deadzone) {
-    return current + delta * alpha * 0.08;
-  }
-  const weightedAlpha = alpha * THREE.MathUtils.clamp((distance - deadzone) / Math.max(deadzone * 3, 0.001), 0.18, 1);
-  return current + delta * weightedAlpha;
-}
-
-function dampStableAngleLimited(current, target, alpha, deadzone, maxStep) {
-  const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
-  const next = dampStableAngle(current, target, alpha, deadzone);
-  const limitedDelta = THREE.MathUtils.clamp(
-    Math.atan2(Math.sin(next - current), Math.cos(next - current)),
-    -Math.min(maxStep, Math.abs(delta)),
-    Math.min(maxStep, Math.abs(delta)),
-  );
-  return current + limitedDelta;
-}
-
-function dampStableVector4(current, target, alpha, deadzone) {
-  const deltas = [target.x - current.x, target.y - current.y, target.z - current.z, target.w - current.w];
-  const distance = Math.hypot(...deltas);
-  const stableAlpha =
-    distance < deadzone
-      ? alpha * 0.08
-      : alpha * THREE.MathUtils.clamp((distance - deadzone) / Math.max(deadzone * 3, 0.001), 0.18, 1);
-  current.x += deltas[0] * stableAlpha;
-  current.y += deltas[1] * stableAlpha;
-  current.z += deltas[2] * stableAlpha;
-  current.w += deltas[3] * stableAlpha;
-  return current;
-}
-
-function dampStableVector4Limited(current, target, alpha, deadzone, maxStep) {
-  tmpVector4.copy(current);
-  dampStableVector4(tmpVector4, target, alpha, deadzone);
-  const deltaX = tmpVector4.x - current.x;
-  const deltaY = tmpVector4.y - current.y;
-  const deltaZ = tmpVector4.z - current.z;
-  const deltaW = tmpVector4.w - current.w;
-  const distance = Math.hypot(deltaX, deltaY, deltaZ, deltaW);
-  const scale = distance > maxStep ? maxStep / Math.max(distance, 0.0001) : 1;
-  current.x += deltaX * scale;
-  current.y += deltaY * scale;
-  current.z += deltaZ * scale;
-  current.w += deltaW * scale;
-  return current;
-}
-
-function lerpAngle(from, to, amount) {
-  return from + Math.atan2(Math.sin(to - from), Math.cos(to - from)) * amount;
-}
-
-function randomSigned(scale) {
-  return (Math.random() - 0.5) * 2 * scale;
-}
-
-const vertexShader = /* glsl */ `
-attribute vec3 aScatter;
-attribute float aSeed;
-attribute float aSize;
-attribute float aCore;
-
-uniform float uTime;
-uniform float uPixelRatio;
-uniform float uIntro;
-uniform float uMode;
-uniform vec4 uPalm;
-uniform vec2 uPalmVelocity;
-uniform vec4 uFace;
-uniform vec2 uFaceVelocity;
-uniform float uFaceRotation;
-uniform vec4 uFaceExpression;
-uniform vec4 uEyeCalib;
-uniform vec4 uEyeFineTune;
-uniform vec4 uFaceEyeAnchors;
-uniform vec4 uMotionSettings;
-uniform vec4 uHandTuning;
-uniform vec4 uVisualSettings;
-uniform int uForceCount;
-uniform vec4 uForce[10];
-uniform vec2 uForceVelocity[10];
-uniform vec4 uPinch[2];
-uniform float uGustTime;
-uniform vec2 uGustOrigin;
-uniform vec2 uGustVelocity;
-uniform float uShockTime;
-uniform vec2 uShockCenter;
-
-varying vec3 vColor;
-varying float vAlpha;
-
-float hash(float n) {
-  return fract(sin(n) * 43758.5453123);
-}
-
-vec2 safeNormalize(vec2 value) {
-  return value / max(length(value), 0.0001);
-}
-
-void main() {
-  vec3 target = position;
-  float motionForce = uMotionSettings.x;
-  float motionCurl = uMotionSettings.y;
-  float motionDepth = uMotionSettings.z;
-  float idleMotion = uMotionSettings.w;
-  float handContactScale = max(uHandTuning.x, 0.05);
-  float handPalmScale = max(uHandTuning.y, 0.05);
-  float handPinchScale = max(uHandTuning.z, 0.05);
-  float handWakeScale = uHandTuning.w;
-  float bloomLift = uVisualSettings.x;
-  float faceFollow = uVisualSettings.y;
-  float faceMotion = uVisualSettings.z;
-  float idle = sin(uTime * 0.8 + aSeed * 21.0) * 0.028 * idleMotion;
-  vec3 radial = normalize(vec3(target.xy, 0.38));
-  target += radial * idle;
-  target.z += sin(uTime * 0.54 + aSeed * 17.0) * 0.035 * idleMotion;
-
-  float intro = smoothstep(0.0, 1.0, uIntro);
-  vec3 transformed = mix(aScatter, target, intro);
-
-  float fingerGlow = 0.0;
-  float palmGlow = 0.0;
-  float pinchGlow = 0.0;
-  float gustGlow = 0.0;
-  float faceGlow = 0.0;
-  float eyeGlow = 0.0;
-  float handGlow = 0.0;
-  float faceVisibility = 1.0;
-
-  if (uMode > 0.5) {
-    float faceStrength = smoothstep(0.0, 0.72, uFace.w);
-    faceVisibility = smoothstep(0.05, 0.44, uFace.w);
-    float mouth = uFaceExpression.x;
-    float faceShake = uFaceExpression.y;
-    float blink = uFaceExpression.z;
-    float yaw = -clamp(uFaceExpression.w, -1.0, 1.0);
-    float sway = clamp(length(uFaceVelocity) * 0.2, 0.0, 1.6);
-    float c = cos(uFaceRotation);
-    float s = sin(uFaceRotation);
-    mat2 faceRotation = mat2(c, s, -s, c);
-    vec2 localPoint = target.xy;
-    vec2 eyeOrigin = uEyeCalib.xy;
-    float eyeScale = max(uEyeCalib.z, 0.05);
-    float eyeSpread = max(uEyeCalib.w, 0.05);
-    float eyeHeight = max(uEyeFineTune.x, 0.05);
-    float blinkResponse = uEyeFineTune.y;
-    float eyeSharpness = max(uEyeFineTune.z, 0.05);
-    float eyeIntensity = uEyeFineTune.w;
-    vec2 detectedEyeMid = (uFaceEyeAnchors.xy + uFaceEyeAnchors.zw) * 0.5;
-    vec2 leftEyeAnchor = detectedEyeMid + (uFaceEyeAnchors.xy - detectedEyeMid) * vec2(eyeSpread, eyeHeight) + eyeOrigin;
-    vec2 rightEyeAnchor = detectedEyeMid + (uFaceEyeAnchors.zw - detectedEyeMid) * vec2(eyeSpread, eyeHeight) + eyeOrigin;
-    vec2 noseAnchor = vec2(0.08, -0.34);
-    float yawAmount = abs(yaw);
-    vec2 headLag = clamp(uFaceVelocity, vec2(-18.0), vec2(18.0));
-    float motionKick = clamp(length(headLag) * 0.2, 0.0, 3.2) * faceMotion;
-    vec2 motionDir = safeNormalize(headLag + vec2(0.0001, 0.0));
-    vec2 motionNormal = vec2(-motionDir.y, motionDir.x);
-    localPoint.x += (localPoint.y + 0.18) * yaw * 0.24;
-    localPoint.x *= 1.0 - yawAmount * 0.16;
-    localPoint.y += yawAmount * sin(aSeed * 13.0 + localPoint.x * 2.0) * 0.035;
-    localPoint += motionNormal * sin(aSeed * 41.0 + uTime * 18.0 + localPoint.y * 3.5) * motionKick * 0.2;
-    localPoint += motionDir * sin(aSeed * 17.0 + uTime * 22.0 + localPoint.x * 2.8) * motionKick * 0.13;
-    vec2 leftEyeVector = localPoint - leftEyeAnchor;
-    vec2 rightEyeVector = localPoint - rightEyeAnchor;
-    leftEyeVector.y /= eyeHeight;
-    rightEyeVector.y /= eyeHeight;
-    float eyeFalloff = 1.55 * eyeSharpness / (eyeScale * eyeScale);
-    float leftEyeZone = exp(-dot(leftEyeVector, leftEyeVector) * eyeFalloff);
-    float rightEyeZone = exp(-dot(rightEyeVector, rightEyeVector) * eyeFalloff);
-    float eyeZone = clamp(leftEyeZone + rightEyeZone, 0.0, 1.0);
-    float noseZone = exp(-dot(localPoint - noseAnchor, localPoint - noseAnchor) * 1.15);
-    float mouthPulse = smoothstep(0.08, 0.78, mouth);
-    float eyeIgnition = smoothstep(${EYE_IGNITION_START.toFixed(2)}, ${EYE_IGNITION_END.toFixed(2)}, blink * blinkResponse);
-    float blinkFold = eyeIgnition * eyeZone;
-    localPoint.y = mix(localPoint.y, 0.58 + (localPoint.y - 0.58) * 0.48, blinkFold);
-    localPoint.x += sin(aSeed * 31.0 + uTime * 18.0) * blinkFold * 0.055;
-    vec2 breathDir = safeNormalize(localPoint + vec2(0.0, 0.18));
-    float breathRipple = sin(uTime * 13.0 + aSeed * 24.0 + length(localPoint) * 4.0) * 0.5 + 0.5;
-    localPoint += breathDir * mouthPulse * (0.12 + breathRipple * 0.16);
-    localPoint += safeNormalize(localPoint - noseAnchor) * noseZone * sway * 0.08;
-    vec2 logoPoint = faceRotation * (localPoint * uFace.z);
-    vec2 outward = safeNormalize(logoPoint);
-    float sparkle = sin(uTime * 7.0 + aSeed * 32.0 + length(target.xy) * 3.0);
-    logoPoint += outward * faceStrength * (0.025 + mouth * 0.18) * sparkle;
-    float leash = 0.052 + length(target.xy) * 0.022 + (1.0 - aCore) * 0.024;
-    float dragAmount = pow(1.0 - faceFollow, 0.75);
-    logoPoint -= headLag * leash * (1.0 + sway * 2.0) * dragAmount;
-    logoPoint += vec2(-headLag.y, headLag.x) * sin(aSeed * 23.0 + uTime * 4.5) * leash * (0.38 + motionKick * 0.32);
-    vec3 faceMounted = vec3(
-      uFace.xy + logoPoint,
-      2.05 + target.z * uFace.z * 0.55 + yaw * localPoint.x * 0.18 + mouthPulse * (0.16 + breathRipple * 0.18) + eyeZone * eyeIgnition * 0.2 + faceShake * faceMotion * 0.42 + motionKick * sin(aSeed * 29.0 + uTime * 24.0) * 0.18
-    );
-    transformed = mix(transformed, faceMounted, faceStrength);
-    eyeGlow = faceStrength * eyeZone * eyeIntensity * eyeIgnition * (0.22 + eyeIgnition * 1.45);
-    faceGlow = faceStrength * (
-      0.34 + aCore * 0.44 + mouthPulse * (0.1 + breathRipple * 0.12) + yawAmount * 0.12 + sway * 0.08 + motionKick * 0.07
-    );
-  }
-
-  if (uMode < 0.5) {
-    handGlow = 0.22;
-    float palmStrength = uPalm.z;
-    if (palmStrength > 0.001) {
-      vec2 fromPalm = target.xy - uPalm.xy;
-      float d = length(fromPalm);
-      vec2 dir = safeNormalize(fromPalm);
-      float depth = 0.75 + uPalm.w * 0.42;
-      float palmRadius = (1.18 + uPalm.w * 0.78) * handPalmScale;
-      float pressure = exp(-pow(d / palmRadius, 2.0));
-      float rim = exp(-pow((d - palmRadius * 0.72) / max(0.18, palmRadius * 0.34), 2.0));
-      float broad = exp(-pow(d / max(palmRadius * 2.65, 0.001), 1.65));
-      float pulse = 0.82 + 0.18 * sin(uTime * 4.6 - d * 2.2 + aSeed * 4.0);
-      float field = palmStrength * depth * (pressure * 0.84 + rim * 0.36) * pulse * motionForce * 1.62;
-      float bloomPush = palmStrength * depth * broad * motionForce * 1.18;
-      vec2 wake = clamp(uPalmVelocity * 0.038 * handWakeScale, vec2(-0.42), vec2(0.42));
-      float handMass = palmStrength * depth * exp(-pow(d / max(palmRadius * 1.72, 0.001), 2.0)) * motionForce;
-      vec2 shear = clamp(uPalmVelocity * 0.026 * handWakeScale, vec2(-0.34), vec2(0.34));
-      vec2 orbital = vec2(-dir.y, dir.x) * sin(uTime * 5.2 + aSeed * 17.0 + d * 2.7) * handMass * 0.045 * motionCurl;
-      transformed.xy += dir * field * (0.66 + pressure * 0.54) + wake * field * (0.38 + rim * 0.58);
-      transformed.xy += shear * (handMass * (0.22 + pressure * 0.36) + bloomPush * 0.24) + orbital;
-      transformed.xy += dir * bloomPush * (0.3 + aCore * 0.16);
-      transformed.z += (field * (0.64 + pressure * 0.56 + aCore * 0.4) + handMass * 0.2 + bloomPush * (0.72 + aCore * 0.46)) * motionDepth;
-      palmGlow += field * (1.08 + rim * 0.44) + handMass * 0.25 + bloomPush * 0.66;
-    }
-
-    for (int i = 0; i < 10; i++) {
-      if (i < uForceCount) {
-        vec4 force = uForce[i];
-        vec2 fromFinger = target.xy - force.xy;
-        float d = length(fromFinger);
-        float radius = max(force.w * handContactScale, 0.08);
-        vec2 dir = safeNormalize(fromFinger);
-        float contact = exp(-pow(d / radius, 2.35));
-        float shell = exp(-pow(d / max(radius * 2.05, 0.001), 1.8));
-        float skin = max(shell - contact * 0.22, 0.0);
-        float speed = clamp(length(uForceVelocity[i]) * 0.16, 0.0, 1.6);
-        float field = force.z * (contact * 0.9 + skin * 0.16) * motionForce * 1.32;
-        vec2 wake = clamp(uForceVelocity[i] * 0.035 * handWakeScale, vec2(-0.34), vec2(0.34));
-        vec2 curl = vec2(-dir.y, dir.x) * sin(uTime * 3.5 + aSeed * 19.0 + d * 6.2);
-        transformed.xy +=
-          dir * field * (0.18 + contact * 0.42) +
-          wake * field * (0.2 + speed * 0.38) +
-          curl * field * (0.075 + speed * 0.12) * motionCurl;
-        transformed.z += field * (0.28 + contact * 0.52 + speed * 0.22) * motionDepth;
-        fingerGlow += force.z * (contact * 0.88 + skin * 0.2 + speed * contact * 0.28) * motionForce;
-      }
-    }
-
-    for (int i = 0; i < 2; i++) {
-      vec4 pinch = uPinch[i];
-      if (pinch.z > 0.001) {
-        vec2 toPinch = pinch.xy - target.xy;
-        float d = length(toPinch) + 0.08;
-        vec2 dir = toPinch / d;
-        vec2 vortex = vec2(-dir.y, dir.x);
-        float core = exp(-pow(d / max(0.46 * handPinchScale, 0.001), 2.0));
-        float pull = exp(-pow(d / max(1.45 * handPinchScale, 0.001), 1.55));
-        float speed = clamp(pinch.w, 0.0, 1.0);
-        float field = pinch.z * (core * 0.96 + pull * 0.28) * motionForce * 1.18;
-        float spin = 0.82 + 0.24 * sin(uTime * 9.0 + d * 4.0 + aSeed * 11.0);
-        transformed.xy += dir * field * (0.58 + core * 0.42) + vortex * field * spin * (0.48 + speed * 0.5) * motionCurl;
-        transformed.z += field * (0.54 + core * 0.42 + speed * 0.26) * motionDepth;
-        pinchGlow += pinch.z * (core * 0.9 + pull * 0.2) * motionForce;
-      }
-    }
-
-    float gustAge = uTime - uGustTime;
-    if (gustAge > 0.0 && gustAge < 1.2) {
-      vec2 dir = safeNormalize(uGustVelocity);
-      vec2 normal = vec2(-dir.y, dir.x);
-      vec2 rel = target.xy - uGustOrigin;
-      float along = dot(rel, dir);
-      float across = abs(dot(rel, normal));
-      float front = 1.0 - smoothstep(0.0, 0.52, abs(along - gustAge * 5.4));
-      float width = exp(-across * 0.42);
-      float decay = pow(1.0 - gustAge / 1.2, 1.5);
-      float gust = front * width * decay;
-      transformed.xy +=
-        dir * gust * 1.15 * motionForce +
-        normal * sin(aSeed * 9.0 + uTime * 6.0) * gust * 0.16 * motionCurl;
-      transformed.z += gust * 0.48 * motionDepth;
-      gustGlow += gust;
-    }
-
-    float shockAge = uTime - uShockTime;
-    if (shockAge > 0.0 && shockAge < 1.85) {
-      vec2 fromShock = target.xy - uShockCenter;
-      float shockDistance = length(fromShock);
-      float wave = 1.0 - smoothstep(0.0, 0.32, abs(shockDistance - shockAge * 4.7));
-      float decay = pow(1.0 - shockAge / 1.85, 1.55);
-      vec3 blast = normalize(vec3(fromShock, 0.34 + hash(aSeed) * 0.7));
-      transformed += blast * decay * (1.0 + wave * 3.8) * vec3(motionForce, motionForce, motionDepth);
-      fingerGlow += decay * (0.34 + wave * 0.5);
-    }
-  }
-
-  vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
-  float perspectiveScale = 24.0 / max(2.0, -mvPosition.z);
-  float energy = clamp(fingerGlow + palmGlow * 0.9 + pinchGlow + gustGlow * 0.8 + faceGlow + eyeGlow + handGlow, 0.0, 3.4);
-  gl_PointSize = aSize * uPixelRatio * perspectiveScale * (0.84 + energy * 0.42);
-  gl_Position = projectionMatrix * mvPosition;
-
-  vec3 base = mix(vec3(0.42, 0.55, 0.68), vec3(0.9, 0.97, 1.0), 0.24 + aCore * 0.68);
-  vec3 shimmer = vec3(0.04, 0.08, 0.1) * sin(aSeed * 20.0 + uTime * 0.7);
-  vec3 forceColor = fingerGlow * vec3(0.24, 0.56, 1.0);
-  vec3 palmColor = palmGlow * vec3(0.0, 0.72, 0.38);
-  vec3 pinchColor = pinchGlow * vec3(0.78, 0.5, 0.08);
-  vec3 gustColor = gustGlow * vec3(0.36, 0.66, 0.82);
-  vec3 faceColor = faceGlow * mix(vec3(0.08, 0.5, 0.42), vec3(0.72, 0.93, 1.0), aCore);
-  vec3 eyeColor = eyeGlow * vec3(1.0, 0.3, 0.03);
-  float emission = 0.95 + bloomLift * 0.78;
-  vColor = (base * 0.58 + shimmer + forceColor + palmColor + pinchColor + gustColor + faceColor + eyeColor) * emission;
-  vAlpha = (0.04 + aCore * 0.065 + energy * 0.12 + (faceGlow + eyeGlow) * 0.018) * faceVisibility * (0.9 + bloomLift * 0.34);
-}
-`;
-
-const fragmentShader = /* glsl */ `
-precision highp float;
-
-varying vec3 vColor;
-varying float vAlpha;
-
-void main() {
-  vec2 uv = gl_PointCoord - 0.5;
-  float d = length(uv);
-  float core = smoothstep(0.5, 0.0, d);
-  float spark = smoothstep(0.17, 0.0, d);
-  float alpha = (core * 0.48 + spark * 0.24) * vAlpha;
-
-  if (alpha < 0.012) {
-    discard;
-  }
-
-  gl_FragColor = vec4(vColor * (0.48 + spark * 0.78), alpha);
-}
-`;
