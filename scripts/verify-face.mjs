@@ -34,7 +34,7 @@ try {
 }
 
 async function verifyFaceTrackingFilters() {
-  const browser = await chromium.launch({ headless: true });
+  return withChromium(async (browser) => {
   const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
   const failures = [];
 
@@ -144,8 +144,17 @@ async function verifyFaceTrackingFilters() {
   }
   failures.push(...settings.failures);
 
-  await browser.close();
   return { failures, dropout, invalid, filter, pose, expression, mounted, settings, visual };
+  });
+}
+
+async function withChromium(run) {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    return await run(browser);
+  } finally {
+    await browser.close();
+  }
 }
 
 async function verifySettingsIsolation(page) {

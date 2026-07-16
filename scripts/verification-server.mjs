@@ -16,9 +16,11 @@ export async function startVerificationServer({ rootDir, configuredBaseUrl, envi
     root: rootDir,
     logLevel: 'error',
     server: {
+      hmr: false,
       host: '127.0.0.1',
       port: initialPort,
       strictPort: false,
+      watch: null,
     },
   });
 

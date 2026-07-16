@@ -219,6 +219,14 @@ const profileRepeatCount = Number(profileRepeatValue);
 if (!/^\d+$/.test(profileRepeatValue) || !Number.isSafeInteger(profileRepeatCount) || profileRepeatCount < 1 || profileRepeatCount > 100) {
   throw new Error('HAND_VERIFY_REPEAT must be an integer from 1 to 100');
 }
+const PROFILE_ATTEMPT_LIMIT = 3;
+
+class VerificationContextLostError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'VerificationContextLostError';
+  }
+}
 
 let verificationServer = null;
 
@@ -313,7 +321,7 @@ try {
 }
 
 async function verifyParticleDensityControl() {
-  const browser = await chromium.launch({ headless: true });
+  return withChromium(async (browser) => {
   const failures = [];
   const auto = await readParticleDensityTransition(browser, 'auto', failures);
   const high = await readParticleDensityTransition(browser, 'high', failures);
@@ -337,8 +345,8 @@ async function verifyParticleDensityControl() {
     }
   }
 
-  await browser.close();
   return { failures, auto, high };
+  });
 }
 
 async function readParticleDensityTransition(browser, qualityMode, failures) {
@@ -407,7 +415,7 @@ async function readParticleDensityTransition(browser, qualityMode, failures) {
 }
 
 async function verifyAdaptiveTrackingFps() {
-  const browser = await chromium.launch({ headless: true });
+  return withChromium(async (browser) => {
   const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
   const failures = [];
 
@@ -472,17 +480,17 @@ async function verifyAdaptiveTrackingFps() {
     failures.push(`fresh video frame gate failed: ${JSON.stringify(freshGate)}`);
   }
 
-  await browser.close();
   return {
     failures,
     normalFps: normal.effectiveTrackingFps,
     pressuredFps: pressured.effectiveTrackingFps,
     trackingPressuredFps: trackingPressured.effectiveTrackingFps,
   };
+  });
 }
 
 async function verifyPointerInputToggle() {
-  const browser = await chromium.launch({ headless: true });
+  return withChromium(async (browser) => {
   const failures = [];
   const off = await readPointerState(browser, false, failures);
   const on = await readPointerState(browser, true, failures);
@@ -496,8 +504,8 @@ async function verifyPointerInputToggle() {
     failures.push(`pointer enabled did not create force: ${JSON.stringify(pickPointerState(on))}`);
   }
 
-  await browser.close();
   return { failures, off, on };
+  });
 }
 
 async function readPointerState(browser, enabled, failures) {
@@ -546,7 +554,7 @@ function pickPointerState(state) {
 }
 
 async function verifyLiveLoopGuards() {
-  const browser = await chromium.launch({ headless: true });
+  return withChromium(async (browser) => {
   const page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
   const failures = [];
 
@@ -603,81 +611,217 @@ async function verifyLiveLoopGuards() {
     failures.push(`fading force compaction corrupted slots: ${JSON.stringify(forceCompaction)}`);
   }
 
-  await browser.close();
   return { failures, errorGuard, streamReset, forceCompaction };
+  });
 }
 
 async function verifyProfile(profile) {
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
-  const failures = [];
-
-  page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
-  page.on('console', (message) => {
-    const text = message.text();
-    if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL/.test(text)) {
-      failures.push(`console: ${text}`);
+  const interruptions = [];
+  for (let attempt = 1; attempt <= PROFILE_ATTEMPT_LIMIT; attempt += 1) {
+    try {
+      return await verifyProfileAttempt(profile);
+    } catch (error) {
+      if (!(error instanceof VerificationContextLostError)) {
+        throw error;
+      }
+      interruptions.push(error.message);
+      if (attempt < PROFILE_ATTEMPT_LIMIT) {
+        console.warn(
+          `RETRY ${profile.name}: verification context lost on attempt ${attempt}/${PROFILE_ATTEMPT_LIMIT}: ${error.message}`,
+        );
+      }
     }
-  });
-
-  await page.addInitScript(() => {
-    localStorage.removeItem('particle-demo-particle-settings');
-    localStorage.removeItem('particle-demo-face-calibration');
-  });
-
-  const url = `${baseUrl}/?mode=hand&settings=1&debug=1&verify=1&syntheticHand=${profile.name}`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await page.waitForFunction(
-    () => window.__particleDemoVerify && window.__particleDemoVerify.getState().handText.includes('HAND'),
-    null,
-    { timeout: 30_000 },
+  }
+  throw new Error(
+    `Verification context for ${profile.name} was lost in ${PROFILE_ATTEMPT_LIMIT} consecutive attempts: ` +
+      interruptions.join(' | '),
   );
-  await page.evaluate(() => window.__particleDemoVerify.resetHandTrackingForTest());
-  await page.waitForTimeout(profile.waitMs);
+}
 
-  if (profile.name === 'drop') {
-    await page
-      .waitForFunction(() => {
-        const state = window.__particleDemoVerify.getState();
-        return state.handText.includes('1 HAND') && state.gestureText.includes('PALM');
-      }, null, { timeout: 8_000 })
-      .catch(() => null);
-  }
+async function verifyProfileAttempt(profile) {
+  return withChromium(async (browser) => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+    const failures = [];
+    const lifecycle = trackVerificationContext(page);
+    let phase = 'initial navigation';
 
-  let observedGust = false;
-  if (profile.name === 'sweep') {
-    observedGust = await page
-      .waitForFunction(() => {
-        const { gustAge } = window.__particleDemoVerify.getState();
-        return gustAge >= 0 && gustAge < 1.2;
-      }, null, { timeout: 8_000 })
-      .then(() => true)
-      .catch(() => false);
-  }
+    page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
+    page.on('console', (message) => {
+      const text = message.text();
+      if (message.type() === 'error' && !/XNNPACK|TFLite|GL Driver|WebGL/.test(text)) {
+        failures.push(`console: ${text}`);
+      }
+    });
 
-  const samples = [];
-  const sampleCount = profile.sampleCount || 1;
-  const sampleEveryMs = profile.sampleEveryMs || 0;
-  for (let index = 0; index < sampleCount; index += 1) {
-    if (index > 0 && sampleEveryMs > 0) {
-      await page.waitForTimeout(sampleEveryMs);
+    try {
+      await page.addInitScript(() => {
+        localStorage.removeItem('particle-demo-particle-settings');
+        localStorage.removeItem('particle-demo-face-calibration');
+      });
+
+      const url = `${baseUrl}/?mode=hand&settings=1&debug=1&verify=1&syntheticHand=${profile.name}`;
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      phase = 'hook initialization';
+      await page.waitForFunction(
+        () => window.__particleDemoVerify?.getState?.().handText.includes('HAND'),
+        null,
+        { timeout: 30_000 },
+      );
+      const resetState = await page.evaluate(() => window.__particleDemoVerify?.resetHandTrackingForTest?.() ?? null);
+      if (!resetState) {
+        throw new VerificationContextLostError('verification hook missing during profile reset');
+      }
+      lifecycle.baselineNavigations = lifecycle.mainFrameNavigations;
+      assertVerificationContext(lifecycle, 'profile reset');
+
+      phase = `initial ${profile.waitMs}ms stabilization`;
+      await page.waitForTimeout(profile.waitMs);
+      assertVerificationContext(lifecycle, phase);
+
+      if (profile.name === 'drop') {
+        phase = 'drop PALM synchronization';
+        await page
+          .waitForFunction(() => {
+            const state = window.__particleDemoVerify?.getState?.();
+            return Boolean(state?.handText.includes('1 HAND') && state.gestureText.includes('PALM'));
+          }, null, { timeout: 8_000 })
+          .catch((error) => {
+            const normalized = normalizeVerificationContextError(error, lifecycle, phase);
+            if (normalized instanceof VerificationContextLostError) {
+              throw normalized;
+            }
+            return null;
+          });
+        assertVerificationContext(lifecycle, phase);
+      }
+
+      let observedGust = false;
+      if (profile.name === 'sweep') {
+        phase = 'sweep gust synchronization';
+        observedGust = await page
+          .waitForFunction(() => {
+            const state = window.__particleDemoVerify?.getState?.();
+            return Boolean(state && state.gustAge >= 0 && state.gustAge < 1.2);
+          }, null, { timeout: 8_000 })
+          .then(() => true)
+          .catch((error) => {
+            const normalized = normalizeVerificationContextError(error, lifecycle, phase);
+            if (normalized instanceof VerificationContextLostError) {
+              throw normalized;
+            }
+            return false;
+          });
+        assertVerificationContext(lifecycle, phase);
+      }
+
+      const samples = [];
+      const sampleCount = profile.sampleCount || 1;
+      const sampleEveryMs = profile.sampleEveryMs || 0;
+      for (let index = 0; index < sampleCount; index += 1) {
+        phase = `sample ${index + 1}/${sampleCount}`;
+        if (index > 0 && sampleEveryMs > 0) {
+          await page.waitForTimeout(sampleEveryMs);
+        }
+        samples.push(await readVerificationState(page, lifecycle, phase));
+      }
+
+      const state = samples[samples.length - 1];
+      const sampleSummary = summarizeSamples(samples);
+      sampleSummary.observedGust = observedGust || sampleSummary.gustActiveCount > 0;
+      phase = 'canvas inspection';
+      assertVerificationContext(lifecycle, phase);
+      const lit = await countLitCanvasPixels(page).catch((error) => {
+        throw normalizeVerificationContextError(error, lifecycle, phase);
+      });
+      assertVerificationContext(lifecycle, phase);
+
+      if (state.mode !== 0) failures.push(`wrong mode ${state.mode}`);
+      if (!state.handText.includes('HAND')) failures.push(`bad hand text ${state.handText}`);
+      if (state.debugLandmarkReadCount < 1) failures.push('debug overlay did not read landmarks');
+      if (lit < 500) failures.push(`lit sample low ${lit}`);
+      failures.push(...profile.expect(state, sampleSummary));
+
+      return { profile: profile.name, failures, state, sampleSummary, lit };
+    } catch (error) {
+      throw normalizeVerificationContextError(error, lifecycle, phase);
     }
-    samples.push(await page.evaluate(() => window.__particleDemoVerify.getState()));
+  });
+}
+
+function trackVerificationContext(page) {
+  const lifecycle = {
+    baselineNavigations: null,
+    crashed: false,
+    closed: false,
+    lastUrl: '',
+    mainFrameNavigations: 0,
+  };
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) {
+      lifecycle.mainFrameNavigations += 1;
+      lifecycle.lastUrl = frame.url();
+    }
+  });
+  page.on('crash', () => {
+    lifecycle.crashed = true;
+  });
+  page.on('close', () => {
+    lifecycle.closed = true;
+  });
+  return lifecycle;
+}
+
+async function readVerificationState(page, lifecycle, phase) {
+  assertVerificationContext(lifecycle, phase);
+  let state;
+  try {
+    state = await page.evaluate(() => window.__particleDemoVerify?.getState?.() ?? null);
+  } catch (error) {
+    throw normalizeVerificationContextError(error, lifecycle, phase);
   }
+  assertVerificationContext(lifecycle, phase);
+  if (!state) {
+    throw new VerificationContextLostError(
+      `${phase}: verification hook unavailable at ${lifecycle.lastUrl || 'unknown URL'}`,
+    );
+  }
+  return state;
+}
 
-  const state = samples[samples.length - 1];
-  const sampleSummary = summarizeSamples(samples);
-  sampleSummary.observedGust = observedGust || sampleSummary.gustActiveCount > 0;
-  const lit = await countLitCanvasPixels(page);
+function assertVerificationContext(lifecycle, phase) {
+  if (lifecycle.crashed) {
+    throw new VerificationContextLostError(`${phase}: Chromium page crashed`);
+  }
+  if (lifecycle.closed) {
+    throw new VerificationContextLostError(`${phase}: Chromium page closed unexpectedly`);
+  }
+  if (
+    lifecycle.baselineNavigations !== null &&
+    lifecycle.mainFrameNavigations !== lifecycle.baselineNavigations
+  ) {
+    throw new VerificationContextLostError(
+      `${phase}: main frame navigated after reset ` +
+        `(${lifecycle.baselineNavigations} -> ${lifecycle.mainFrameNavigations}, ${lifecycle.lastUrl || 'unknown URL'})`,
+    );
+  }
+}
 
-  if (state.mode !== 0) failures.push(`wrong mode ${state.mode}`);
-  if (!state.handText.includes('HAND')) failures.push(`bad hand text ${state.handText}`);
-  if (state.debugLandmarkReadCount < 1) failures.push('debug overlay did not read landmarks');
-  if (lit < 500) failures.push(`lit sample low ${lit}`);
-  failures.push(...profile.expect(state, sampleSummary));
-
-  await browser.close();
-  return { profile: profile.name, failures, state, sampleSummary, lit };
+function normalizeVerificationContextError(error, lifecycle, phase) {
+  if (error instanceof VerificationContextLostError) {
+    return error;
+  }
+  try {
+    assertVerificationContext(lifecycle, phase);
+  } catch (contextError) {
+    return contextError;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /Execution context was destroyed|Cannot find context|Target page, context or browser has been closed|Page crashed|Cannot read properties of undefined \(reading 'getState'\)/i.test(message)
+  ) {
+    return new VerificationContextLostError(`${phase}: ${message}`);
+  }
+  return error;
 }
 
 function summarizeSamples(samples) {
@@ -794,6 +938,15 @@ async function countLitCanvasPixels(page) {
     }
     return lit;
   });
+}
+
+async function withChromium(run) {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    return await run(browser);
+  } finally {
+    await browser.close();
+  }
 }
 
 function delay(ms) {
