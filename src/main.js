@@ -9,7 +9,7 @@ import logoUrl from '../logomark-dark.svg?url';
 import {
   PARTICLE_COUNT, MIN_PARTICLE_COUNT, DEFAULT_PARTICLE_COUNT, MAX_FORCES, TARGET_RENDER_FPS,
   FPS_DISPLAY_CAP, MIN_RENDER_FRAME_MS, FRAME_SKIP_EPSILON_MS, MIN_ADAPTIVE_TRACKING_FPS,
-  FORCE_LOOP_EPSILON, TRACKING_MODES, CAMERA_STORAGE_KEY, CALIBRATION_STORAGE_KEY,
+  FORCE_LOOP_EPSILON, HAND_GUST_MIN_SPEED, TRACKING_MODES, CAMERA_STORAGE_KEY, CALIBRATION_STORAGE_KEY,
   PARTICLE_SETTINGS_STORAGE_KEY, DEFAULT_CAMERA_VALUE, PHONE_CAMERA_PATTERN, HAND_TIP_INDICES,
   HAND_TIP_SET, HAND_TIP_SLOTS, FINGER_CHAINS, LONG_FINGER_TIPS, HAND_CONNECTIONS, FACE_LANDMARKS,
   FACE_DEBUG_POINTS, LOGO_FACE_ANCHORS, DEFAULT_FACE_EYE_ANCHORS, DEFAULT_FACE_CALIBRATION,
@@ -121,6 +121,7 @@ let lastSyntheticHandAt = 0;
 let syntheticHandStartedAt = 0;
 let lastClapTime = -10;
 let lastGustTime = -10;
+let gustTriggerCount = 0;
 let lastTwoHandDistance = 10;
 let cameraMode = 'CAMERA';
 let cameraSettings = { frameRate: 0, width: 0, height: 0 };
@@ -793,6 +794,8 @@ function installVerifyHooks() {
         forces: uniforms.uForce.value.map((force) => force.toArray()),
         palm: uniforms.uPalm.value.toArray(),
         palmVelocity: uniforms.uPalmVelocity.value.toArray(),
+        palmSpeed: reusableHandState.palm.speed,
+        gustSpeedThreshold: HAND_GUST_MIN_SPEED,
         pinchEnergy,
         pinches: uniforms.uPinch.value.map((pinch) => pinch.toArray()),
         activeParticleCount,
@@ -814,6 +817,7 @@ function installVerifyHooks() {
         trackingHealth: { ...trackingHealth },
         lastProcessedVideoTime,
         gustAge: uniforms.uTime.value - uniforms.uGustTime.value,
+        gustTriggerCount,
         shockAge: uniforms.uTime.value - uniforms.uShockTime.value,
         handText: handDebugHands.textContent,
         gestureText: handDebugGesture.textContent,
@@ -1287,7 +1291,7 @@ function updateSyntheticHandResult(elapsedSeconds) {
     writeSyntheticHand(0, 0.5 + travel, 0.65 + driftY * 0.5, 0, 1);
     writeSyntheticHand(1, 0.5 - travel, 0.65 - driftY * 0.35, 0, -1);
   } else if (profile === 'sweep') {
-    const sweepX = 0.5 + Math.sin(elapsedSeconds * 5.4) * 0.24;
+    const sweepX = getSyntheticSweepX(elapsedSeconds);
     const sweepY = 0.66 + Math.sin(elapsedSeconds * 2.2) * 0.035;
     writeSyntheticHand(0, sweepX, sweepY, 0, 1);
   } else {
@@ -1314,6 +1318,23 @@ function updateSyntheticHandResult(elapsedSeconds) {
   handDebugStats.fps = THREE.MathUtils.lerp(handDebugStats.fps || syntheticFps, syntheticFps, 0.18);
   handDebugStats.lastVideoFrameAt = now;
   handDebugStats.lastDetectAt = now;
+}
+
+function getSyntheticSweepX(elapsedSeconds) {
+  const sweepDuration = 0.28;
+  const holdDuration = 0.3;
+  const cycleDuration = (sweepDuration + holdDuration) * 2;
+  const phase = elapsedSeconds % cycleDuration;
+  if (phase < sweepDuration) {
+    return THREE.MathUtils.lerp(0.25, 0.75, phase / sweepDuration);
+  }
+  if (phase < sweepDuration + holdDuration) {
+    return 0.75;
+  }
+  if (phase < sweepDuration * 2 + holdDuration) {
+    return THREE.MathUtils.lerp(0.75, 0.25, (phase - sweepDuration - holdDuration) / sweepDuration);
+  }
+  return 0.25;
 }
 
 function isSyntheticDropoutFrame(profile, elapsedSeconds) {
@@ -3146,10 +3167,11 @@ function withVelocity(key, position, cache, deltaSeconds, filter = null) {
 function updateGustTrigger(handState, elapsedSeconds) {
   if (
     handState.palm.strength > 0.38 &&
-    handState.palm.speed > 0.62 &&
+    handState.palm.speed > HAND_GUST_MIN_SPEED &&
     elapsedSeconds - lastGustTime > 0.55
   ) {
     lastGustTime = elapsedSeconds;
+    gustTriggerCount += 1;
     uniforms.uGustTime.value = elapsedSeconds;
     uniforms.uGustOrigin.value.set(handState.palm.position.x, handState.palm.position.y);
     uniforms.uGustVelocity.value.copy(handState.palm.velocity).clampLength(0, 8);
@@ -4206,6 +4228,15 @@ function resetHandUniforms() {
   for (const pinch of uniforms.uPinch.value) {
     pinch.set(0, 0, 0, 0);
   }
+  uniforms.uGustTime.value = -100;
+  uniforms.uGustOrigin.value.set(0, 0);
+  uniforms.uGustVelocity.value.set(0, 0);
+  uniforms.uShockTime.value = -100;
+  uniforms.uShockCenter.value.set(0, 0);
+  lastGustTime = -10;
+  gustTriggerCount = 0;
+  lastClapTime = -10;
+  lastTwoHandDistance = 10;
 }
 
 function resetFaceUniforms() {

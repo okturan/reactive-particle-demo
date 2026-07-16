@@ -15,6 +15,7 @@ const profiles = [
       if (state.forceEnergy > 0.75) failures.push(`open palm fingertip force too high ${state.forceEnergy}`);
       if (state.palm[2] <= 0.75) failures.push(`open palm strength low ${state.palm[2]}`);
       if (state.palm[2] > 2.2) failures.push(`open palm strength too high ${state.palm[2]}`);
+      if (state.gustTriggerCount !== 0) failures.push(`open palm triggered ${state.gustTriggerCount} gusts`);
       if (!state.gestureText.includes('PALM')) failures.push(`open gesture not PALM: ${state.gestureText}`);
       return failures;
     },
@@ -193,6 +194,10 @@ const profiles = [
       const failures = [];
       if (!state.handText.includes('1 HAND')) failures.push(`sweep hand text bad: ${state.handText}`);
       if (sampleSummary.maxPalm <= 0.25) failures.push(`sweep palm strength low: ${sampleSummary.maxPalm}`);
+      if (sampleSummary.maxPalmSpeed <= state.gustSpeedThreshold) {
+        failures.push(`sweep palm speed low: ${sampleSummary.maxPalmSpeed}/${state.gustSpeedThreshold}`);
+      }
+      if (state.gustTriggerCount < 1) failures.push('sweep gust trigger count stayed at zero');
       if (!sampleSummary.observedGust) failures.push('sweep did not trigger a gust wake');
       return failures;
     },
@@ -281,7 +286,7 @@ try {
       `${status} ${report.profile}${runLabel}: ${report.state.gestureText}, ${report.state.handText}, ` +
         `forces=${report.state.forceCount}/${report.state.activeForceSlots}, forceEnergy=${report.state.forceEnergy.toFixed(3)}, ` +
         `live=${report.state.liveForceCount}, unstable=${report.sampleSummary.maxUnstableFingerCount}, ` +
-        `palm=${report.state.palm[2].toFixed(3)}, pinch=${report.state.pinchEnergy.toFixed(3)}, ` +
+        `palm=${report.state.palm[2].toFixed(3)}/${report.sampleSummary.maxPalmSpeed.toFixed(3)}, pinch=${report.state.pinchEnergy.toFixed(3)}, ` +
         `shockAge=${report.state.shockAge.toFixed(3)}, maxForce=${report.sampleSummary.maxForceEnergy.toFixed(3)}, ` +
         `gust=${report.sampleSummary.gustActiveCount}, shock=${report.sampleSummary.shockActiveCount}, ` +
         `zero=${report.sampleSummary.zeroHandSamples}, held=${report.sampleSummary.maxHeldHandCount}/${report.sampleSummary.maxHeldForceCount}, ` +
@@ -630,6 +635,15 @@ async function verifyProfile(profile) {
   await page.evaluate(() => window.__particleDemoVerify.resetHandTrackingForTest());
   await page.waitForTimeout(profile.waitMs);
 
+  if (profile.name === 'drop') {
+    await page
+      .waitForFunction(() => {
+        const state = window.__particleDemoVerify.getState();
+        return state.handText.includes('1 HAND') && state.gestureText.includes('PALM');
+      }, null, { timeout: 8_000 })
+      .catch(() => null);
+  }
+
   let observedGust = false;
   if (profile.name === 'sweep') {
     observedGust = await page
@@ -672,6 +686,7 @@ function summarizeSamples(samples) {
   let maxForceEnergy = 0;
   let maxForcePositionStep = 0;
   let maxPalm = 0;
+  let maxPalmSpeed = 0;
   let maxPinch = 0;
   let unstableFingerSamples = 0;
   let maxUnstableFingerCount = 0;
@@ -702,6 +717,7 @@ function summarizeSamples(samples) {
       previousPrimaryForce = primaryForce;
     }
     maxPalm = Math.max(maxPalm, state.palm[2]);
+    maxPalmSpeed = Math.max(maxPalmSpeed, state.palmSpeed || 0);
     maxPinch = Math.max(maxPinch, state.pinchEnergy);
     if ((state.unstableFingerCount || 0) > 0) {
       unstableFingerSamples += 1;
@@ -743,6 +759,7 @@ function summarizeSamples(samples) {
     maxForceEnergy,
     maxForcePositionStep,
     maxPalm,
+    maxPalmSpeed,
     maxPinch,
     unstableFingerSamples,
     maxUnstableFingerCount,

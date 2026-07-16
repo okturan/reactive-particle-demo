@@ -10,6 +10,7 @@ export const MIN_RENDER_FRAME_MS = 1000 / TARGET_RENDER_FPS;
 export const FRAME_SKIP_EPSILON_MS = 0.1;
 export const MIN_ADAPTIVE_TRACKING_FPS = 30;
 export const FORCE_LOOP_EPSILON = 0.02;
+export const HAND_GUST_MIN_SPEED = 0.38;
 export const TRACKING_MODES = {
   HAND: 'hand',
   FACE: 'face',
