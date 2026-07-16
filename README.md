@@ -13,7 +13,7 @@ An interactive browser prototype that turns live hand and face landmarks from a 
 
 ## Project status
 
-This is a working showcase prototype, not a release-ready application. The production build and synthetic face suite pass locally. The hand suite currently reports two regressions: dropped-hand force compaction and the synthetic sweep gust trigger. A Wrangler static-assets configuration is included, but no public deployment or repository homepage is currently verified; run the project locally unless a verified demo URL is added later.
+This is a working showcase prototype, not a release-ready application. The production build and both synthetic verification suites pass locally. Each suite starts its own isolated Vite server by default so a stale or concurrently stopped development server cannot contaminate the result. A Wrangler static-assets configuration is included, but no public deployment or repository homepage is currently verified; run the project locally unless a verified demo URL is added later.
 
 ## Privacy and browser requirements
 
@@ -40,6 +40,12 @@ npm run verify:face
 ```
 
 The verification scripts start Vite automatically when needed and use Playwright with synthetic tracking inputs.
+
+To stress a specific hand behavior, select one or more profiles and repeat them in the same isolated run:
+
+```bash
+HAND_VERIFY_PROFILES=drop,sweep HAND_VERIFY_REPEAT=5 npm run verify:hand
+```
 
 ## Architecture
 
