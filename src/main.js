@@ -496,6 +496,21 @@ function installVerifyHooks() {
         health: { ...state.trackingHealth },
       };
     },
+    testForceCompaction() {
+      resetHandUniforms();
+      uniforms.uForce.value[1].set(1, 0, 0.4, 0.5);
+      uniforms.uForce.value[4].set(4, 0, 0.2, 0.3);
+      uniforms.uForceCount.value = compactFadingForces(0);
+      const state = this.getState();
+      const report = {
+        forceCount: state.forceCount,
+        activeForceSlots: state.activeForceSlots,
+        compactedSources: state.forces.slice(0, state.forceCount).map((force) => force[0]),
+        inactiveEnergy: state.forces.slice(state.forceCount).reduce((sum, force) => sum + force[2], 0),
+      };
+      resetHandUniforms();
+      return report;
+    },
     testVideoFrameGate(firstMediaTime = 1, secondMediaTime = firstMediaTime) {
       lastProcessedVideoTime = -1;
       duplicateFrameSkipCount = 0;
@@ -3187,15 +3202,7 @@ function applyHandState(handState) {
       uploadedForceCount += 1;
     }
   }
-  for (let i = uploadedForceCount; i < MAX_FORCES; i += 1) {
-    const current = uniforms.uForce.value[i];
-    const currentVelocity = uniforms.uForceVelocity.value[i];
-    current.z *= 0.74;
-    current.w *= 0.72;
-    currentVelocity.multiplyScalar(0.7);
-    uploadedForceSourceIds[i] = -1;
-  }
-  uniforms.uForceCount.value = getForceLoopCount(uploadedForceCount);
+  uniforms.uForceCount.value = compactFadingForces(uploadedForceCount);
 
   const palmStrength =
     handState.palm.strength * particleSettings.palmStrength * (reducedMotion ? 0.35 : 1);
@@ -3225,14 +3232,29 @@ function applyHandState(handState) {
   updateInteractionMarkers(handState);
 }
 
-function getForceLoopCount(activeCount = 0) {
-  let count = activeCount;
-  for (let i = activeCount; i < MAX_FORCES; i += 1) {
-    if (uniforms.uForce.value[i].z > FORCE_LOOP_EPSILON) {
-      count = i + 1;
+function compactFadingForces(activeCount = 0) {
+  let nextSlot = activeCount;
+  for (let readSlot = activeCount; readSlot < MAX_FORCES; readSlot += 1) {
+    const force = uniforms.uForce.value[readSlot];
+    const velocity = uniforms.uForceVelocity.value[readSlot];
+    force.z *= 0.74;
+    force.w *= 0.72;
+    velocity.multiplyScalar(0.7);
+    if (force.z <= FORCE_LOOP_EPSILON) {
+      continue;
     }
+    if (nextSlot !== readSlot) {
+      uniforms.uForce.value[nextSlot].copy(force);
+      uniforms.uForceVelocity.value[nextSlot].copy(velocity);
+    }
+    nextSlot += 1;
   }
-  return count;
+  for (let slot = nextSlot; slot < MAX_FORCES; slot += 1) {
+    uniforms.uForce.value[slot].set(0, 0, 0, 0);
+    uniforms.uForceVelocity.value[slot].set(0, 0);
+  }
+  uploadedForceSourceIds.fill(-1, activeCount);
+  return nextSlot;
 }
 
 function applyFaceState(faceState) {
@@ -4421,5 +4443,3 @@ function setDebugPoint(target, landmark, videoRect) {
   target.y = videoRect.y + landmark.y * videoRect.height;
   return target;
 }
-
-

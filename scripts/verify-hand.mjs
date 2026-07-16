@@ -1,11 +1,10 @@
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { startVerificationServer } from './verification-server.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const baseUrl = process.env.HAND_VERIFY_BASE_URL || 'http://127.0.0.1:5173';
+let baseUrl = '';
 const profiles = [
   {
     name: 'open',
@@ -194,23 +193,46 @@ const profiles = [
       const failures = [];
       if (!state.handText.includes('1 HAND')) failures.push(`sweep hand text bad: ${state.handText}`);
       if (sampleSummary.maxPalm <= 0.25) failures.push(`sweep palm strength low: ${sampleSummary.maxPalm}`);
-      if (sampleSummary.gustActiveCount < 1) failures.push('sweep did not trigger a gust wake');
+      if (!sampleSummary.observedGust) failures.push('sweep did not trigger a gust wake');
       return failures;
     },
   },
 ];
+const requestedProfileNames = (process.env.HAND_VERIFY_PROFILES || '')
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean);
+const unknownProfileNames = requestedProfileNames.filter((name) => !profiles.some((profile) => profile.name === name));
+if (unknownProfileNames.length) {
+  throw new Error(`Unknown HAND_VERIFY_PROFILES: ${unknownProfileNames.join(', ')}`);
+}
+const selectedProfiles = requestedProfileNames.length
+  ? profiles.filter((profile) => requestedProfileNames.includes(profile.name))
+  : profiles;
+const profileRepeatValue = process.env.HAND_VERIFY_REPEAT || '1';
+const profileRepeatCount = Number(profileRepeatValue);
+if (!/^\d+$/.test(profileRepeatValue) || !Number.isSafeInteger(profileRepeatCount) || profileRepeatCount < 1 || profileRepeatCount > 100) {
+  throw new Error('HAND_VERIFY_REPEAT must be an integer from 1 to 100');
+}
 
-let serverProcess = null;
+let verificationServer = null;
 
 try {
-  await ensureServer();
+  verificationServer = await startVerificationServer({
+    rootDir,
+    configuredBaseUrl: process.env.HAND_VERIFY_BASE_URL?.trim(),
+    environmentVariable: 'HAND_VERIFY_BASE_URL',
+  });
+  baseUrl = verificationServer.baseUrl;
   const adaptiveReport = await verifyAdaptiveTrackingFps();
   const densityReport = await verifyParticleDensityControl();
   const pointerReport = await verifyPointerInputToggle();
   const liveGuardReport = await verifyLiveLoopGuards();
   const reports = [];
-  for (const profile of profiles) {
-    reports.push(await verifyProfile(profile));
+  for (const profile of selectedProfiles) {
+    for (let run = 1; run <= profileRepeatCount; run += 1) {
+      reports.push({ ...(await verifyProfile(profile)), run });
+    }
   }
 
   const adaptiveStatus = adaptiveReport.failures.length ? 'FAIL' : 'PASS';
@@ -245,7 +267,8 @@ try {
   console.log(
     `${liveGuardStatus} live-guards: hand=${liveGuardReport.errorGuard.hand.cameraMode}/${liveGuardReport.errorGuard.hand.trackingPressure.toFixed(2)}, ` +
       `face=${liveGuardReport.errorGuard.face.cameraMode}/${liveGuardReport.errorGuard.face.trackingPressure.toFixed(2)}, ` +
-      `reset=${liveGuardReport.streamReset.forceCount}/${liveGuardReport.streamReset.forceEnergy.toFixed(3)}`,
+      `reset=${liveGuardReport.streamReset.forceCount}/${liveGuardReport.streamReset.forceEnergy.toFixed(3)}, ` +
+      `compact=${liveGuardReport.forceCompaction.forceCount}/${liveGuardReport.forceCompaction.activeForceSlots}`,
   );
   for (const failure of liveGuardReport.failures) {
     console.error(`  - ${failure}`);
@@ -253,8 +276,9 @@ try {
 
   for (const report of reports) {
     const status = report.failures.length ? 'FAIL' : 'PASS';
+    const runLabel = profileRepeatCount > 1 ? `#${report.run}` : '';
     console.log(
-      `${status} ${report.profile}: ${report.state.gestureText}, ${report.state.handText}, ` +
+      `${status} ${report.profile}${runLabel}: ${report.state.gestureText}, ${report.state.handText}, ` +
         `forces=${report.state.forceCount}/${report.state.activeForceSlots}, forceEnergy=${report.state.forceEnergy.toFixed(3)}, ` +
         `live=${report.state.liveForceCount}, unstable=${report.sampleSummary.maxUnstableFingerCount}, ` +
         `palm=${report.state.palm[2].toFixed(3)}, pinch=${report.state.pinchEnergy.toFixed(3)}, ` +
@@ -280,9 +304,7 @@ try {
     process.exitCode = 1;
   }
 } finally {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM');
-  }
+  await verificationServer?.close();
 }
 
 async function verifyParticleDensityControl() {
@@ -543,6 +565,7 @@ async function verifyLiveLoopGuards() {
 
   const errorGuard = await page.evaluate(() => window.__particleDemoVerify.testTrackingErrorGuard());
   const streamReset = await page.evaluate(() => window.__particleDemoVerify.testStreamResetClearsTracking());
+  const forceCompaction = await page.evaluate(() => window.__particleDemoVerify.testForceCompaction());
 
   if (errorGuard.hand.cameraMode !== 'TRACK ERR') {
     failures.push(`hand tracking error did not surface TRACK ERR: ${JSON.stringify(errorGuard.hand)}`);
@@ -568,48 +591,15 @@ async function verifyLiveLoopGuards() {
   if (streamReset.health.liveCount !== 0 || streamReset.health.missCount !== 0) {
     failures.push(`stream reset did not clear tracking health: ${JSON.stringify(streamReset.health)}`);
   }
+  if (forceCompaction.forceCount !== 2 || forceCompaction.activeForceSlots !== 2) {
+    failures.push(`fading force gaps were not compacted: ${JSON.stringify(forceCompaction)}`);
+  }
+  if (forceCompaction.compactedSources.join(',') !== '1,4' || forceCompaction.inactiveEnergy > 0.001) {
+    failures.push(`fading force compaction corrupted slots: ${JSON.stringify(forceCompaction)}`);
+  }
 
   await browser.close();
-  return { failures, errorGuard, streamReset };
-}
-
-async function ensureServer() {
-  if (await canReachServer()) {
-    return;
-  }
-
-  const viteBin = path.join(rootDir, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
-  if (!existsSync(viteBin)) {
-    throw new Error('Vite binary not found. Run npm install first.');
-  }
-
-  serverProcess = spawn(viteBin, ['--host', '127.0.0.1'], {
-    cwd: rootDir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, BROWSER: 'none' },
-  });
-
-  serverProcess.stdout.on('data', (chunk) => process.stdout.write(`[vite] ${chunk}`));
-  serverProcess.stderr.on('data', (chunk) => process.stderr.write(`[vite] ${chunk}`));
-
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    if (await canReachServer()) {
-      return;
-    }
-    await delay(250);
-  }
-
-  throw new Error(`Timed out waiting for ${baseUrl}`);
-}
-
-async function canReachServer() {
-  try {
-    const response = await fetch(baseUrl, { method: 'GET' });
-    return response.ok;
-  } catch {
-    return false;
-  }
+  return { failures, errorGuard, streamReset, forceCompaction };
 }
 
 async function verifyProfile(profile) {
@@ -640,6 +630,17 @@ async function verifyProfile(profile) {
   await page.evaluate(() => window.__particleDemoVerify.resetHandTrackingForTest());
   await page.waitForTimeout(profile.waitMs);
 
+  let observedGust = false;
+  if (profile.name === 'sweep') {
+    observedGust = await page
+      .waitForFunction(() => {
+        const { gustAge } = window.__particleDemoVerify.getState();
+        return gustAge >= 0 && gustAge < 1.2;
+      }, null, { timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false);
+  }
+
   const samples = [];
   const sampleCount = profile.sampleCount || 1;
   const sampleEveryMs = profile.sampleEveryMs || 0;
@@ -652,6 +653,7 @@ async function verifyProfile(profile) {
 
   const state = samples[samples.length - 1];
   const sampleSummary = summarizeSamples(samples);
+  sampleSummary.observedGust = observedGust || sampleSummary.gustActiveCount > 0;
   const lit = await countLitCanvasPixels(page);
 
   if (state.mode !== 0) failures.push(`wrong mode ${state.mode}`);

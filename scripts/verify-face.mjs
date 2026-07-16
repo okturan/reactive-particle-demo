@@ -1,15 +1,19 @@
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { startVerificationServer } from './verification-server.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const baseUrl = process.env.FACE_VERIFY_BASE_URL || 'http://127.0.0.1:5173';
-let serverProcess = null;
+let baseUrl = '';
+let verificationServer = null;
 
 try {
-  await ensureServer();
+  verificationServer = await startVerificationServer({
+    rootDir,
+    configuredBaseUrl: process.env.FACE_VERIFY_BASE_URL?.trim(),
+    environmentVariable: 'FACE_VERIFY_BASE_URL',
+  });
+  baseUrl = verificationServer.baseUrl;
   const report = await verifyFaceTrackingFilters();
   const status = report.failures.length ? 'FAIL' : 'PASS';
   console.log(
@@ -26,9 +30,7 @@ try {
     process.exitCode = 1;
   }
 } finally {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM');
-  }
+  await verificationServer?.close();
 }
 
 async function verifyFaceTrackingFilters() {
@@ -144,49 +146,6 @@ async function verifyFaceTrackingFilters() {
 
   await browser.close();
   return { failures, dropout, invalid, filter, pose, expression, mounted, settings, visual };
-}
-
-async function ensureServer() {
-  if (await canReachServer()) {
-    return;
-  }
-
-  const viteBin = path.join(rootDir, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
-  if (!existsSync(viteBin)) {
-    throw new Error('Vite binary not found. Run npm install first.');
-  }
-
-  serverProcess = spawn(viteBin, ['--host', '127.0.0.1'], {
-    cwd: rootDir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, BROWSER: 'none' },
-  });
-
-  serverProcess.stdout.on('data', (chunk) => process.stdout.write(`[vite] ${chunk}`));
-  serverProcess.stderr.on('data', (chunk) => process.stderr.write(`[vite] ${chunk}`));
-
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    if (await canReachServer()) {
-      return;
-    }
-    await delay(250);
-  }
-
-  throw new Error(`Timed out waiting for ${baseUrl}`);
-}
-
-async function canReachServer() {
-  try {
-    const response = await fetch(baseUrl, { method: 'GET' });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function verifySettingsIsolation(page) {
