@@ -2,6 +2,8 @@
 
 An interactive browser prototype that turns live hand and face landmarks from a webcam into a GPU-rendered Three.js particle field. MediaPipe inference and rendering run on the user's device, while React stays focused on the controls and status UI.
 
+![Synthetic hand sweep driving the reactive particle field](docs/assets/reactive-particle-hand.png)
+
 ## What it demonstrates
 
 - Hand mode maps fingertips, palms, pinches, sweeps, and claps to particle forces and shockwaves.
@@ -40,6 +42,8 @@ npm run verify:face
 ```
 
 The verification scripts start Vite automatically when needed and use Playwright with synthetic tracking inputs.
+
+The README image is captured from that same synthetic path, so it does not contain webcam footage or personal data. Regenerate it with `npm run capture:showcase` after installing Playwright's Chromium browser.
 
 To stress a specific hand behavior, select one or more profiles and repeat them in the same isolated run:
 

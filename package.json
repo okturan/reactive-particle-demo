@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "capture:showcase": "node scripts/capture-showcase.mjs",
     "verify:hand": "node scripts/verify-hand.mjs",
     "verify:face": "node scripts/verify-face.mjs"
   },
