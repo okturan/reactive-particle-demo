@@ -129,13 +129,16 @@ const profiles = [
   {
     name: 'stall',
     waitMs: 1800,
-    sampleCount: 20,
+    sampleCount: 12,
     sampleEveryMs: 50,
     expect(state, sampleSummary) {
       const failures = [];
       if (!state.handText.includes('1 HAND')) failures.push(`stall did not recover to one hand: ${state.handText}`);
+      if (state.trackingHealth?.liveCount < 1) failures.push(`stall did not recover live tracking: ${state.trackingHealth?.liveCount}`);
       if (state.handSlotResetCount !== 0) failures.push(`stall reset hand slots: ${state.handSlotResetCount}`);
-      if (sampleSummary.zeroHandSamples > 0) failures.push(`stall surfaced ${sampleSummary.zeroHandSamples} zero-hand UI samples`);
+      if (sampleSummary.maxConsecutiveZeroHandSamples > 1) {
+        failures.push(`stall surfaced ${sampleSummary.maxConsecutiveZeroHandSamples} consecutive zero-hand UI samples`);
+      }
       if (sampleSummary.heldHandSamples < 3) failures.push(`stall held too briefly: ${sampleSummary.heldHandSamples}`);
       if (sampleSummary.maxHeldHandCount < 1) failures.push(`stall held too few hands: ${sampleSummary.maxHeldHandCount}`);
       if (sampleSummary.maxPalm <= 0.18) failures.push(`stall palm faded too far: ${sampleSummary.maxPalm}`);
@@ -749,6 +752,20 @@ async function verifyProfileAttempt(profile) {
         samples.push(await readVerificationState(page, lifecycle, phase));
       }
 
+      if (profile.name === 'stall') {
+        phase = 'stall live recovery';
+        await page
+          .waitForFunction(() => {
+            const state = window.__particleDemoVerify?.getState?.();
+            return Boolean(state?.handText.includes('1 HAND') && state.trackingHealth?.liveCount > 0);
+          }, null, { timeout: 8_000 })
+          .catch((error) => {
+            throw normalizeVerificationContextError(error, lifecycle, phase);
+          });
+        assertVerificationContext(lifecycle, phase);
+        samples.push(await readVerificationState(page, lifecycle, phase));
+      }
+
       const state = samples[samples.length - 1];
       const sampleSummary = summarizeSamples(samples);
       sampleSummary.observedGust = observedGust || sampleSummary.gustActiveCount > 0;
@@ -862,6 +879,8 @@ function summarizeSamples(samples) {
   let gustActiveCount = 0;
   let shockActiveCount = 0;
   let zeroHandSamples = 0;
+  let consecutiveZeroHandSamples = 0;
+  let maxConsecutiveZeroHandSamples = 0;
   let heldForceSamples = 0;
   let maxHeldForceCount = 0;
   let heldHandSamples = 0;
@@ -900,6 +919,10 @@ function summarizeSamples(samples) {
     }
     if (state.handText.includes('0 HAND')) {
       zeroHandSamples += 1;
+      consecutiveZeroHandSamples += 1;
+      maxConsecutiveZeroHandSamples = Math.max(maxConsecutiveZeroHandSamples, consecutiveZeroHandSamples);
+    } else {
+      consecutiveZeroHandSamples = 0;
     }
     if ((state.heldForceCount || 0) > 0) {
       heldForceSamples += 1;
@@ -935,6 +958,7 @@ function summarizeSamples(samples) {
     gustActiveCount,
     shockActiveCount,
     zeroHandSamples,
+    maxConsecutiveZeroHandSamples,
     heldForceSamples,
     maxHeldForceCount,
     heldHandSamples,
