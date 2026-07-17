@@ -695,6 +695,30 @@ async function verifyProfileAttempt(profile) {
         assertVerificationContext(lifecycle, phase);
       }
 
+      if (profile.name === 'stall') {
+        phase = 'stall live-hand synchronization';
+        await page
+          .waitForFunction(() => {
+            const state = window.__particleDemoVerify?.getState?.();
+            return Boolean(state?.handText.includes('1 HAND') && state.trackingHealth?.liveCount > 0);
+          }, null, { timeout: 8_000 })
+          .catch((error) => {
+            throw normalizeVerificationContextError(error, lifecycle, phase);
+          });
+        assertVerificationContext(lifecycle, phase);
+
+        phase = 'stall held-hand synchronization';
+        await page
+          .waitForFunction(() => {
+            const state = window.__particleDemoVerify?.getState?.();
+            return Boolean(state?.trackingHealth?.heldCount > 0);
+          }, null, { timeout: 8_000 })
+          .catch((error) => {
+            throw normalizeVerificationContextError(error, lifecycle, phase);
+          });
+        assertVerificationContext(lifecycle, phase);
+      }
+
       let observedGust = false;
       if (profile.name === 'sweep') {
         phase = 'sweep gust synchronization';
