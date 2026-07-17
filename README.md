@@ -2,6 +2,8 @@
 
 An interactive browser prototype that turns live hand and face landmarks from a webcam into a GPU-rendered Three.js particle field. MediaPipe inference and rendering run on the user's device, while React stays focused on the controls and status UI.
 
+**[Open the live demo](https://reactive-particle-demo.okan.workers.dev/)** — choose `MOUSE` for the no-camera interaction path, or opt into `HAND` or `FACE` after reviewing the privacy notes below.
+
 ![Synthetic hand sweep driving the reactive particle field](docs/assets/reactive-particle-hand.png)
 
 ## What it demonstrates
@@ -15,7 +17,7 @@ An interactive browser prototype that turns live hand and face landmarks from a 
 
 ## Project status
 
-This is a working showcase prototype, not a release-ready application. The production build and both synthetic verification suites pass locally. Each suite starts its own isolated Vite server by default so a stale or concurrently stopped development server cannot contaminate the result. A Wrangler static-assets configuration is included, but no public deployment or repository homepage is currently verified; run the project locally unless a verified demo URL is added later.
+This is a working showcase prototype, not a release-ready application. The production build and both synthetic verification suites pass locally and against the [public Cloudflare deployment](https://reactive-particle-demo.okan.workers.dev/). Each suite starts its own isolated Vite server by default so a stale or concurrently stopped development server cannot contaminate the result; an explicit base URL runs the same behavioral checks against the deployed origin.
 
 ## Privacy and browser requirements
 
@@ -63,14 +65,19 @@ HAND_VERIFY_PROFILES=drop,sweep HAND_VERIFY_REPEAT=5 npm run verify:hand
 
 ## Deployment
 
-The app builds to `dist/` and can be deployed as static assets after authenticating Wrangler:
+The verified public demo is served as static assets at [reactive-particle-demo.okan.workers.dev](https://reactive-particle-demo.okan.workers.dev/). The deployment has no server-side application code, data bindings, or secrets. Build and deploy it after authenticating Wrangler:
 
 ```bash
 npm run build
 npx wrangler deploy
 ```
 
-Deployment configuration is not evidence of a live service; add a homepage link only after the deployed URL has been checked in a real browser.
+After deployment, verify both synthetic modes against the public origin rather than treating a successful upload as application proof:
+
+```bash
+HAND_VERIFY_BASE_URL=https://reactive-particle-demo.okan.workers.dev npm run verify:hand
+FACE_VERIFY_BASE_URL=https://reactive-particle-demo.okan.workers.dev npm run verify:face
+```
 
 ## License
 
