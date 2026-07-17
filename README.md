@@ -79,6 +79,12 @@ HAND_VERIFY_BASE_URL=https://reactive-particle-demo.okan.workers.dev npm run ver
 FACE_VERIFY_BASE_URL=https://reactive-particle-demo.okan.workers.dev npm run verify:face
 ```
 
+## Security and maintenance
+
+Report security issues through GitHub's [private vulnerability reporting form](https://github.com/okturan/reactive-particle-demo/security/advisories/new), not a public issue. The [security policy](SECURITY.md) documents the browser-local camera boundary, third-party model delivery, public synthetic controls, and static Cloudflare deployment.
+
+Dependabot checks npm and GitHub Actions weekly, groups security updates separately from routine minor/patch maintenance, and limits routine work to one review per ecosystem. Every update must still pass the production build and complete synthetic hand and face browser verification before merge.
+
 ## License
 
 No license is currently granted for this repository. The source is public for inspection, but copying, modification, or redistribution requires permission from the copyright holder. Third-party libraries, MediaPipe runtime/models, and brand assets remain subject to their respective terms.
