@@ -754,16 +754,19 @@ async function verifyProfileAttempt(profile) {
 
       if (profile.name === 'stall') {
         phase = 'stall live recovery';
-        await page
+        const recoveredStateHandle = await page
           .waitForFunction(() => {
             const state = window.__particleDemoVerify?.getState?.();
-            return Boolean(state?.handText.includes('1 HAND') && state.trackingHealth?.liveCount > 0);
+            return state?.handText.includes('1 HAND') && state.trackingHealth?.liveCount > 0
+              ? JSON.parse(JSON.stringify(state))
+              : false;
           }, null, { timeout: 8_000 })
           .catch((error) => {
             throw normalizeVerificationContextError(error, lifecycle, phase);
           });
         assertVerificationContext(lifecycle, phase);
-        samples.push(await readVerificationState(page, lifecycle, phase));
+        samples.push(await recoveredStateHandle.jsonValue());
+        await recoveredStateHandle.dispose();
       }
 
       const state = samples[samples.length - 1];
