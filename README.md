@@ -87,4 +87,6 @@ Dependabot checks npm and GitHub Actions weekly, groups security updates separat
 
 ## License
 
-No license is currently granted for this repository. The source is public for inspection, but copying, modification, or redistribution requires permission from the copyright holder. Third-party libraries, MediaPipe runtime/models, and brand assets remain subject to their respective terms.
+Original source code and documentation in this repository are available under
+the [MIT License](./LICENSE). Third-party libraries, the MediaPipe runtime and
+models, and brand assets remain subject to their respective terms.
